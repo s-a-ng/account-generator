@@ -29,4 +29,4 @@ jobs:
           UPLOAD_KEY: ${{ secrets.UPLOAD_KEY }}
         run: |
           echo $UID > /proc/self/loginuid
-          DISPLAY=:99 python ./scripts/firefox.py
+          DISPLAY=:99 python ./scripts/generate/firefox.py
