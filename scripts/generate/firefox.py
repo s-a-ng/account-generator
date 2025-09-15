@@ -10,6 +10,19 @@ import random, time
 
 print(f"runner ip: {requests.get('https://api.ipify.org/').text}")
 
+
+import getpass
+
+try:
+    os.getlogin()
+except OSError:
+    def getlogin_monkey_patch():
+        return getpass.getuser()
+
+    os.getlogin = getlogin_monkey_patch
+
+
+
 def generate_random_birthdate():
     month = random.choice(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
     day = random.choice(range(1, 27))
@@ -102,33 +115,32 @@ def kill_account_protection(drv):
 
         unprotected_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='unprotected-button']")))
         unprotected_btn.click()
-        print("Clicked 'Unprotected' button.") # Debug print
+        print("Clicked 'Unprotected' button.") 
         random_sleep(1.4, 2) 
 
         checkbox_label = wait.until(EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div[3]/div/div[1]/span/div[2]/label")))
-        checkbox_label.click()
-        print("Clicked checkbox.") # Debug print
+        checkbox_label.click() 
+        print("Clicked checkbox.") 
         random_sleep()
 
         disable_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='disable-button']")))
         disable_btn.click()
-        print("Clicked 'Disable' button.") # Debug print
-        time.sleep(1) # wait just in case if pop up
-        try:
-            popup = drv.find_element(By.XPATH, "/html/body/div[2]/div[2]")
-            if popup.is_displayed():
-                print("Password popup appeared.") # Debug print
-                password_input = drv.find_element(By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[2]/div/input")
-                password_input.clear()
-                password_input.send_keys(PASSWORD)
-                print("Entered password in popup.") # Debug print
+        print("Clicked 'Disable' button.") 
+        time.sleep(5) # wait just in case if pop up
 
-                confirm_btn = drv.find_element(By.XPATH, "/html/body/div[2]/div[2]/div/div/div[3]/div/button")
-                confirm_btn.click()
-                print("Clicked confirm button in popup.") # Debug print
-                
-        except Exception as e:
-            print("something broke blame miller:", e)
+        drv.switch_to.frame("challenge-frame")
+
+        password_input_box = drv.find_element(By.ID, "two-step-verification-code-input")
+        password_input_box.send_keys(PASSWORD) 
+        random_sleep(.5, 1.2)
+
+        verify_button = drv.find_element(By.CSS_SELECTOR, 'button.btn-cta-md.modal-modern-footer-button[aria-label="Verify"]')
+        verify_button.click()
+  
+        drv.switch_to.default_content()
+
+        time.sleep(3)
+
 
     except Exception as e:
         print("settings step failed:", e)
@@ -154,7 +166,15 @@ def main():
 
             try:
                 driver.find_element(By.CSS_SELECTOR, 'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]')
-                print("Detected captcha, done. ")
+                print("Detected captcha, done.")
+                driver.quit()
+                exit()
+            except Exception:
+                pass
+
+            try:
+                driver.find_element(By.CSS_SELECTOR, 'div#GeneralErrorText[role="button"][aria-label="dismiss general error"]')
+                print("Detected general error, quitting.")
                 driver.quit()
                 exit()
             except Exception:
@@ -165,10 +185,16 @@ def main():
         if success:
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
             
-            response = requests.post("http://pi.bug.tools:4200/api/upload_cookie", json={
-                "Cookie": roblosecurity_cookie["value"],
-                "Key": upload_key
-            })
+            response = requests.post(
+                "http://pi.bug.tools:4200/api/upload_created_cookie",
+                json={
+                    "Cookie": roblosecurity_cookie["value"]
+                },
+                headers={
+                    "x-api-key": upload_key
+                }
+            )
+
             if response.status_code == 200:
                 print("Cookie uploaded successfully.")
             else:
