@@ -130,11 +130,11 @@ def kill_account_protection(drv):
 
         drv.switch_to.frame("challenge-frame")
 
-        password_input_box = drv.find_element(By.ID, "two-step-verification-code-input")
+        password_input_box = wait.until(EC.presence_of_element_located((By.ID, "two-step-verification-code-input")))  
         password_input_box.send_keys(PASSWORD) 
         random_sleep(.5, 1.2)
 
-        verify_button = drv.find_element(By.CSS_SELECTOR, 'button.btn-cta-md.modal-modern-footer-button[aria-label="Verify"]')
+        verify_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button.btn-cta-md.modal-modern-footer-button[aria-label="Verify"]')))   
         verify_button.click()
   
         drv.switch_to.default_content()
