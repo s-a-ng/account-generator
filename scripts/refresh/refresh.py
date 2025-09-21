@@ -30,10 +30,17 @@ async def GetXSRFToken(Session, Cookie):
             return XCSRF
 
 async def RefreshCookie(Session, Cookie, XCSRFToken):
+    payload = {
+        "clientPublicKey": "string",
+        "clientEpochTimestamp": 0,
+        "saiSignature": "string",
+        "serverNonce": "string"
+    }
     async with Session.post(
         reauthcookieurl,
         cookies={'.ROBLOSECURITY': Cookie},
-        headers={'X-CSRF-TOKEN': XCSRFToken}
+        headers={'X-CSRF-TOKEN': XCSRFToken},
+        json=payload
     ) as response:
         setcookie = response.headers.get('set-cookie', '')
         match = re.search(r'\.ROBLOSECURITY=(.+?); domain=\.roblox\.com;', setcookie)
