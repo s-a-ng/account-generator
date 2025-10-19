@@ -32,10 +32,40 @@ def generate_random_birthdate():
 PASSWORD = "Glibbertyglobbersmelledafogger!"
 upload_key = os.getenv("UPLOAD_KEY")
 
-firstnames = ["sang", "prefer", "shownape", "caet", "spec", "bug", "baggie", "smith", "doraldo", "ches", "john", "james", "frog", "miller", "aust", "cluster", "john"] # heh..
-middlenames = ["swag", "isawesome", "isnice", "isamazing", "smells", "ismean", "isokay", "mid", "derp", "sweg", "toilet", "admin", "packet", "cube"]
-lastnames = ["itius", "inion", "ion", "ian","xd", "xD", "ii", "th", "v", "rum", "cache"]
+firstnames = [
+    "john","Jane","scott","ian","jimmy","r2eq","mark","Just","rea3","Christos",
+    "opan","scar","Gluerell","pixel","skib","george","ahmad","Unu","neo","luna",
+    "Max","zero","nova","echo","kai","drip","ace","blitz","rex","niko","vex","lex",
+    "rami","theo","dino","mira","nash","pyro","juno","aria","zane","finn","tara",
+    "omar","riley","zyro","cyn","ash","chloe","brynn","milo","toby","ezra","axel",
+    "vale","skye","ryn","dusk","jett","haze","emi","kora","lio","nira","kane",
+    "drew","rook","blair","jax","novae","rune","faye","lars","tess","mika","rei",
+    "zeph","cole","timo","grey","wren","arlo","lux","bree","seth","remi","vera",
+    "zion","maddie","eli","rhea","nox","ivy","kace","lark","nemo","arden","ty","l0g","c4de","mist","oz"
+]
 
+middlenames = [
+    "_3","the4","And5","men1","664","S1dney","sl33per","simpon","bee","DJd33",
+    "wil12","Van","bayar","zz","404","xX","pro","Dev","dark","_the","v2","exe",
+    "_bot","999","666","777","XL","jr","onfire","Ultra","beta","alpha","Core",
+    "_real","dat","meta","neo","micro","Macro","prime","alt","0","01","02","x",
+    "xx","XXX","low","High","deep","Fast","slow","Cold","hot","void","Doom",
+    "space","Tech","iron","Ghost","night","Sun","moon","Cloud","air","Fire","ice",
+    "earth","Stone","dust","Wave","warp","Hyper","cyber","Ninja","mage","Tank",
+    "sn1p3","Aim","shot","blast","botz","Droid","Sys","port","Root"
+]
+
+lastnames = [
+    "itius","inion","Ion","Ian","xd","xD","II","Th","v","Rum","cache","0251",
+    "kai","Walls","14","00","AS","capybara","sammy","Lord","Master","Core","Byte",
+    "sync","Zero","nix","Burn","dust","Nova","storm","Lite","Rise","loop","man",
+    "x","99","Zone","code","Crash","void","Cube","Stack","Flow","drop","End","fox",
+    "Owl","wolf","Hawk","bear","Bee","Fish","Whale","lion","Panther","Tiger",
+    "crow","Ghost","shade","Spark","Flame","Ray","Drake","snake","Spider","cube",
+    "Data","file","Gate","link","Net","Mode","prog","Clip","Cast","shot","Band",
+    "Play","jam","Spin","wave","mix","Hack","crpt","corex","unit","Rider","sig",
+    "Stormz","Sparkz","Darkz","Lightz","Plus","Prime","Seed","Dusty","Voidy","Mind"
+]
 def generate_username():
     return random.choice(firstnames) + random.choice(middlenames) + random.choice(lastnames) + str(random.randint(1, 999))
         
