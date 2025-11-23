@@ -1,14 +1,67 @@
-from undetected_geckodriver import Firefox
+
 import os
 import requests
+import re
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
+from pymailtm import Account
 
 import random, time 
+import string
 
-print(f"runner ip: {requests.get('https://api.ipify.org/').text}")
+def generateUsername():
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+
+def generateEmail(password):
+    maxRetries = 3
+    for attempt in range(maxRetries):
+        try:
+            domain_response = requests.get("https://api.mail.tm/domains", timeout=10)
+            domain_response.raise_for_status()
+            domains = domain_response.json().get('hydra:member', [])
+            
+            if not domains:
+                raise Exception("No domains available")
+
+            domain = random.choice(domains)['domain']
+            username = generateUsername()
+            address = f"{username}@{domain}"
+
+            account_response = requests.post(
+                "https://api.mail.tm/accounts", 
+                json={"address": address, "password": password}, 
+                timeout=10
+            )
+            
+            if account_response.status_code == 201:
+                account_data = account_response.json()
+                
+                token_response = requests.post(
+                    "https://api.mail.tm/token",
+                    json={"address": address, "password": password},
+                    timeout=10
+                )
+                
+                if token_response.status_code == 200:
+                    token = token_response.json().get("token")
+                    if token:
+                        return address, password, token, account_data['id']
+            
+            if attempt < maxRetries - 1:
+                time.sleep(2)
+                
+        except Exception as e:
+            print(f"Error creating email: {e}")
+            if attempt < maxRetries - 1:
+                time.sleep(2)
+
+    raise Exception(f"Failed to create email after {maxRetries} attempts")
+
+
+USE_CHROME = False
+
 
 
 import getpass
@@ -66,6 +119,9 @@ lastnames = [
     "Play","jam","Spin","wave","mix","Hack","crpt","corex","unit","Rider","sig",
     "Stormz","Sparkz","Darkz","Lightz","Plus","Prime","Seed","Dusty","Voidy","Mind"
 ]
+
+#print("total combinations", len(firstnames) * len(middlenames) * len(lastnames) * 9 * 9 * 9)
+
 def generate_username():
     return random.choice(firstnames) + random.choice(middlenames) + random.choice(lastnames) + str(random.randint(1, 999))
         
@@ -179,9 +235,109 @@ def kill_account_protection(drv):
     print("Account protection successfully killed.") # Debug print
     return True
 
+
+
+def poll_email(email, emailPassword, emailID):
+    print(f"Polling email for {email}...")
+    emailCheckAttempts = 0
+    maxEmailAttempts = 300
+    account = Account(emailID, email, emailPassword)
+
+    while emailCheckAttempts < maxEmailAttempts:
+        print(f"Email poll attempt {emailCheckAttempts + 1}/{maxEmailAttempts}")
+        try:
+            messages = account.get_messages()
+            if len(messages) > 0:
+                print(f"Found {len(messages)} messages.")
+                return messages
+        except Exception as e:
+            print(f"Error checking email: {e}")
+
+        emailCheckAttempts += 1
+        time.sleep(5)
+
+    print("Email polling timed out.")
+    return False
+
+def link_email(driver, email):
+    print("Linking email...")
+    driver.get("https://www.roblox.com/my/account#!/info")
+    wait = WebDriverWait(driver, 10)
+
+    btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@class='account-field-settings-text']//button[contains(@class, 'foundation-web-button')]//span[text()='Add']/..")))
+    btn.click()
+    print("Clicked Add button.")
+    email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
+    email_input.send_keys(email)
+    print(f"Entered email into modal: {email}")
+    random_sleep()
+    
+    add_email_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='modal-full-width-button btn-primary-md btn-min-width' and text()='Add Email']")))
+    add_email_btn.click()
+    print("Clicked Add Email button")
+    random_sleep()
+
+
+def verify_email_address(driver):
+    email, emailPassword, token, emailID = generateEmail(PASSWORD)
+    print(f"Generated email: {email}")
+
+    link_email(driver, email)
+    
+
+    messages = poll_email(email, emailPassword, emailID)
+    if messages:
+        msg = messages[0]
+        body = getattr(msg, 'text', None)
+
+        if not body and hasattr(msg, 'html') and msg.html and len(msg.html) > 0:
+            body = msg.html[0]
+
+        if body:
+            print("Email body found.")
+            match = re.search(r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+', body)
+            if match:
+                link = match.group(0)
+                print(f"Verification link found: {link}")
+                driver.get(link)
+                return True
+            else:
+                print("No verification link found in email body.")
+        else:
+            print("No email body found.")
+
+    return False
+
+
+def poll_for_captcha(driver):
+    while True: 
+        if "https://www.roblox.com/home" in driver.current_url: 
+            break
+
+        try:
+            driver.find_element(By.CSS_SELECTOR, 'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]')
+            print("Detected captcha, done.")
+            driver.quit()
+            exit()
+        except Exception:
+            pass
+
+        try:
+            driver.find_element(By.CSS_SELECTOR, 'div#GeneralErrorText[role="button"][aria-label="dismiss general error"]')
+            print("Detected general error, quitting.")
+            driver.quit()
+            exit()
+        except Exception:
+            pass
+
+
 def main():
-    driver = Firefox()
-    #driver.maximize_window()
+    if USE_CHROME:
+        import undetected_chromedriver as uc
+        driver = uc.Chrome()
+    else:
+        from undetected_geckodriver import Firefox
+        driver = Firefox()
         
     try:
         print("Browser initialized.") # Debug print
@@ -190,33 +346,22 @@ def main():
 
         fill_out_page(driver)
 
-        while True: 
-            if "https://www.roblox.com/home" in driver.current_url: 
-                break
-
-            try:
-                driver.find_element(By.CSS_SELECTOR, 'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]')
-                print("Detected captcha, done.")
-                driver.quit()
-                exit()
-            except Exception:
-                pass
-
-            try:
-                driver.find_element(By.CSS_SELECTOR, 'div#GeneralErrorText[role="button"][aria-label="dismiss general error"]')
-                print("Detected general error, quitting.")
-                driver.quit()
-                exit()
-            except Exception:
-                pass
+        poll_for_captcha(driver)
 
         success = kill_account_protection(driver)
+
+        verified = verify_email_address(driver)
+
+        if verified:
+            print("Email verified.")
+        else:
+            print("Email verification failed.")
 
         if success:
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
             
             response = requests.post(
-                "https://botpool.gpnotifier.org/api/upload_created_cookie",
+                "http://botpool.gpnotifier.org/api/upload_created_cookie",
                 json={
                     "Cookie": roblosecurity_cookie["value"]
                 },
