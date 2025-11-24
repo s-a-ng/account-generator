@@ -262,7 +262,7 @@ def poll_email(email, emailPassword, emailID):
 def link_email(driver, email):
     print("Linking email...")
     driver.get("https://www.roblox.com/my/account#!/info")
-    wait = WebDriverWait(driver, 10)
+    wait = WebDriverWait(driver, 30)
 
     btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@class='account-field-settings-text']//button[contains(@class, 'foundation-web-button')]//span[text()='Add']/..")))
     btn.click()
