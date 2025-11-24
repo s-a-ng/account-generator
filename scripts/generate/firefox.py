@@ -264,12 +264,23 @@ def link_email(driver, email):
     driver.get("https://www.roblox.com/my/account#!/info")
     wait = WebDriverWait(driver, 30)
 
-    btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@class='account-field-settings-text']//button[contains(@class, 'foundation-web-button')]//span[text()='Add']/..")))
-    btn.click()
-    print("Clicked Add button.")
-    email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
-    email_input.send_keys(email)
-    print(f"Entered email into modal: {email}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f"Link email attempt {attempt + 1}/{max_retries}")
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@class='account-field-settings-text']//button[contains(@class, 'foundation-web-button')]//span[text()='Add']/..")))
+            btn.click()
+            print("Clicked Add button.")
+            
+            email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
+            email_input.send_keys(email)
+            print(f"Entered email into modal: {email}")
+            break
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            time.sleep(2)
+
     random_sleep()
     
     add_email_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='modal-full-width-button btn-primary-md btn-min-width' and text()='Add Email']")))
@@ -361,7 +372,7 @@ def main():
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
             
             response = requests.post(
-                "https://botpool.gpnotifier.org/api/create_session_with_cookie",
+                "http://botpool.gpnotifier.org/api/upload_created_cookie",
                 json={
                     "Cookie": roblosecurity_cookie["value"]
                 },
