@@ -271,10 +271,11 @@ def link_email(driver, email):
             print(f"Link email attempt {attempt + 1}/{max_retries}")
             
             try:
-                email_input = WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.ID, "emailAddress")))
+                email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
                 print("Email input found immediately.")
                 email_input.clear()
                 email_input.send_keys(email)
+                print(f"Entered email into modal: {email}")
                 break
             except TimeoutException:
                 pass 
@@ -287,7 +288,7 @@ def link_email(driver, email):
             except ElementClickInterceptedException:
                 print("Button click intercepted, modal likely already open.")
             
-            email_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "emailAddress")))
+            email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
             email_input.clear()
             email_input.send_keys(email)
             print(f"Entered email into modal: {email}")
