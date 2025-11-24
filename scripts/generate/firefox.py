@@ -361,7 +361,7 @@ def main():
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
             
             response = requests.post(
-                "https://botpool.gpnotifier.org/api/upload_created_cookie",
+                "https://botpool.gpnotifier.org/api/create_session_with_cookie",
                 json={
                     "Cookie": roblosecurity_cookie["value"]
                 },
