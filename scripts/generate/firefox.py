@@ -6,6 +6,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException
 from pymailtm import Account
 
 import random, time 
@@ -262,21 +263,37 @@ def poll_email(email, emailPassword, emailID):
 def link_email(driver, email):
     print("Linking email...")
     driver.get("https://www.roblox.com/my/account#!/info")
-    wait = WebDriverWait(driver, 30)
+    wait = WebDriverWait(driver, 15)
 
     max_retries = 3
     for attempt in range(max_retries):
         try:
             print(f"Link email attempt {attempt + 1}/{max_retries}")
-            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@class='account-field-settings-text']//button[contains(@class, 'foundation-web-button')]//span[text()='Add']/..")))
-            btn.click()
-            print("Clicked Add button.")
             
-            email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
+            try:
+                email_input = WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.ID, "emailAddress")))
+                print("Email input found immediately.")
+                email_input.clear()
+                email_input.send_keys(email)
+                break
+            except TimeoutException:
+                pass 
+
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@class='account-field-settings-text']//button[contains(@class, 'foundation-web-button')]//span[text()='Add']/..")))
+            
+            try:
+                btn.click()
+                print("Clicked Add button.")
+            except ElementClickInterceptedException:
+                print("Button click intercepted, modal likely already open.")
+            
+            email_input = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "emailAddress")))
+            email_input.clear()
             email_input.send_keys(email)
             print(f"Entered email into modal: {email}")
             break
         except Exception as e:
+            print(f"Failed to link email on attempt {attempt + 1}: {e}")
             if attempt == max_retries - 1:
                 raise e
             time.sleep(2)
