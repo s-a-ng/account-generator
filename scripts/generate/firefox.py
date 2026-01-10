@@ -123,7 +123,8 @@ lastnames = [
 #print("total combinations", len(firstnames) * len(middlenames) * len(lastnames) * 9 * 9 * 9)
 
 def generate_username():
-    return random.choice(firstnames) + random.choice(middlenames) + random.choice(lastnames) + str(random.randint(1, 999))
+    firstname = random.randint(1,10000) == 1 and "shownape" or random.choice(firstnames)
+    return firstname + random.choice(middlenames) + random.choice(lastnames) + str(random.randint(1, 999))
         
 
 def random_sleep(min = 0.3, max = 0.8):
