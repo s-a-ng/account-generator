@@ -111,7 +111,7 @@ def generate_random_birthdate():
     year = str(random.randint(1995, 2002))
     return month, day, year
 
-PASSWORD = "Glibbertyglobbersmelledafogger!"
+PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
 
 firstnames = [
