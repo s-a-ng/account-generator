@@ -8,8 +8,38 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from pymailtm import Account
 
-import random, time 
+import random, time
 import string
+import subprocess, atexit, signal
+
+VIDEO_PATH   =  "9089uilbo0890"
+LOOPBACK_DEV = "pio;jk;jk;;2"
+_ffmpeg_proc = None
+
+def start_fake_webcam():
+    global _ffmpeg_proc
+    if _ffmpeg_proc and _ffmpeg_proc.poll() is None:
+        return
+    if not os.path.exists(LOOPBACK_DEV):
+        raise RuntimeError(f"{LOOPBACK_DEV} missing — load v4l2loopback first")
+    if not os.path.exists(VIDEO_PATH):
+        raise RuntimeError(f"video {VIDEO_PATH} not found — set FAKE_CAM_VIDEO")
+    _ffmpeg_proc = subprocess.Popen([
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-stream_loop", "-1", "-re", "-i", VIDEO_PATH,
+        "-vf", "scale=1280:720,fps=30,format=yuv420p",
+        "-f", "v4l2", LOOPBACK_DEV,
+    ], stdin=subprocess.DEVNULL)
+    time.sleep(1)
+
+def stop_fake_webcam():
+    global _ffmpeg_proc
+    if _ffmpeg_proc and _ffmpeg_proc.poll() is None:
+        _ffmpeg_proc.send_signal(signal.SIGINT)
+        try: _ffmpeg_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired: _ffmpeg_proc.kill()
+
+#atexit.register(stop_fake_webcam)
 
 def generateUsername():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
@@ -61,7 +91,6 @@ def generateEmail(password):
 
 
 USE_CHROME = False
-
 
 
 import getpass
@@ -132,33 +161,33 @@ def random_sleep(min = 0.3, max = 0.8):
 
 def fill_out_page(driver):
     month, day, year = generate_random_birthdate()
-    print(f"Generated birthdate: {month} {day}, {year}") # Debug print
+    print(f"Generated birthdate: {month} {day}, {year}") 
 
     month_select = Select(driver.find_element(By.ID, "MonthDropdown"))
     month_select.select_by_value(month)
-    print(f"Selected month: {month}") # Debug print
+    print(f"Selected month: {month}") 
 
     day_select = Select(driver.find_element(By.ID, "DayDropdown"))
     day_select.select_by_value(f"{day:02d}")
-    print(f"Selected day: {day}") # Debug print
+    print(f"Selected day: {day}") 
 
     year_select = Select(driver.find_element(By.ID, "YearDropdown"))
     year_select.select_by_value(year)
-    print(f"Selected year: {year}") # Debug print
+    print(f"Selected year: {year}") 
 
     username_input = driver.find_element(By.ID, "signup-username")
     
     while True:
         username = generate_username()
         username_input.send_keys(username)
-        print(f"Attempting username: {username}") # Debug print
+        print(f"Attempting username: {username}") 
        # driver.execute_script("arguments[0].blur();", username_input)
         random_sleep()
         
         try:
             success_div = driver.find_element(By.XPATH, "//div[contains(@class, 'has-success') and input[@id='signup-username']]")
             if success_div:
-                print(f"Username {username} accepted.") # Debug print
+                print(f"Username {username} accepted.") 
                 break
         except:
             pass
@@ -166,7 +195,7 @@ def fill_out_page(driver):
         try:
             error_div = driver.find_element(By.XPATH, "//div[contains(@class, 'has-error') and input[@id='signup-username']]")
             if error_div:
-                print(f"Username {username} rejected, trying again.") # Debug print
+                print(f"Username {username} rejected, trying again.") 
                 username_input.send_keys(Keys.CONTROL + "a")
                 username_input.send_keys(Keys.DELETE) # different way same result - miller
         except:
@@ -175,7 +204,7 @@ def fill_out_page(driver):
 
     password_input = driver.find_element(By.ID, "signup-password")
     password_input.send_keys(PASSWORD)
-    print("Password entered.") # Debug print
+    print("Password entered.") 
     random_sleep()
 
     try:
@@ -197,7 +226,7 @@ def fill_out_page(driver):
 def kill_account_protection(drv):
     try:
         drv.get("https://create.roblox.com/settings/advanced")
-        print("Accessed account protection settings page.") # Debug print
+        print("Accessed account protection settings page.") 
         wait = WebDriverWait(drv, 30)
 
         unprotected_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='unprotected-button']")))
@@ -233,7 +262,7 @@ def kill_account_protection(drv):
         print("settings step failed:", e)
         return False # solution: kill yourself - miller
 
-    print("Account protection successfully killed.") # Debug print
+    print("Account protection successfully killed.") 
     return True
 
 
@@ -265,7 +294,7 @@ def link_email(driver, email):
     driver.get("https://www.roblox.com/my/account#!/info")
     wait = WebDriverWait(driver, 30)
 
-    btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'settings-text-field-container')][.//span[text()='Email']]//button[contains(@class, 'foundation-web-button')]//span[text()='Add']/..")))
+    btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'settings-text-field-container')][.//span[text()='Email']]//button[contains(@class, 'foundation-web-button') and .//span[normalize-space()='Add']]")))
     btn.click()
     print("Clicked Add button.")
     email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
@@ -310,6 +339,38 @@ def verify_email_address(driver):
     return False
 
 
+def age_verify(driver):
+    print("Starting age verification...")
+    driver.get("https://www.roblox.com/my/account#!/info")
+    wait = WebDriverWait(driver, 30)
+
+    cam_btn = wait.until(EC.element_to_be_clickable((
+        By.XPATH,
+        "//div[contains(@class,'age-verification-upsell-banner')]"
+        "//button[.//span[normalize-space()='Continue with camera']]"
+    )))
+    cam_btn.click()
+    print("Clicked 'Continue with camera'.")
+    random_sleep(1, 2)
+
+    persona_iframe = wait.until(EC.presence_of_element_located((
+        By.CSS_SELECTOR, 'iframe.persona-widget__iframe'
+    )))
+    driver.switch_to.frame(persona_iframe)
+    print("Switched into Persona iframe.")
+
+    try:
+        continue_btn = wait.until(EC.element_to_be_clickable((
+            By.XPATH, "//button[.//span[normalize-space()='Continue'] or normalize-space()='Continue']"
+        )))
+        continue_btn.click()
+        print("Clicked Continue inside Persona widget.")
+        random_sleep(1, 2)
+        return True
+    finally:
+        driver.switch_to.default_content()
+
+
 def poll_for_captcha(driver):
     while True: 
         if "https://www.roblox.com/home" in driver.current_url: 
@@ -333,17 +394,27 @@ def poll_for_captcha(driver):
 
 
 def main():
+  #  start_fake_webcam()
+
     if USE_CHROME:
         import undetected_chromedriver as uc
-        driver = uc.Chrome()
+        opts = uc.ChromeOptions()
+        opts.add_argument("--use-fake-ui-for-media-stream")
+        driver = uc.Chrome(options=opts)
     else:
         from undetected_geckodriver import Firefox
-        driver = Firefox()
+        from selenium.webdriver.firefox.options import Options as FxOptions
+        opts = FxOptions()
+        opts.set_preference("permissions.default.camera", 1)
+        opts.set_preference("permissions.default.microphone", 1)
+        opts.set_preference("media.navigator.permission.disabled", True)
+        opts.set_preference("media.getusermedia.insecure.enabled", True)
+        driver = Firefox(options=opts)
         
     try:
-        print("Browser initialized.") # Debug print
+        print("Browser initialized.") 
         driver.get("https://www.roblox.com/CreateAccount")
-        print("Accessed Roblox account creation page.") # Debug print
+        print("Accessed Roblox account creation page.") 
 
         fill_out_page(driver)
 
@@ -358,11 +429,16 @@ def main():
         else:
             print("Email verification failed.")
 
+        try:
+           # age_verify(driver)
+        except Exception as e:
+            print(f"Age verification step failed: {e}")
+
         if success:
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
             
             response = requests.post(
-                "https://botpool.gpnotifier.org/api/create_session_with_cookie",
+                "https://command.botted.org/api/create_session_with_cookie",
                 json={
                     "Cookie": roblosecurity_cookie["value"]
                 },
