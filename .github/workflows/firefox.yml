@@ -27,6 +27,7 @@ jobs:
       - name: Run generator
         env:
           UPLOAD_KEY: ${{ secrets.UPLOAD_KEY }}
+          PASSWORD: ${{ secrets.PASSWORD }}
         run: |
           echo $UID > /proc/self/loginuid
           DISPLAY=:99 python ./scripts/generate/firefox.py
