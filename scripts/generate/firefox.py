@@ -429,10 +429,7 @@ def main():
         else:
             print("Email verification failed.")
 
-        try:
-           # age_verify(driver)
-        except Exception as e:
-            print(f"Age verification step failed: {e}")
+        age_verified = False # age_verify(driver)
 
         if success:
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
