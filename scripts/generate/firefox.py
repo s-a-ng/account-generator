@@ -113,6 +113,8 @@ def generate_random_birthdate():
 
 PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
+upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/roblox-sessions/import")
+session_proxy = os.getenv("ROBLOX_SESSION_PROXY") or os.getenv("PROXY")
 
 firstnames = [
     "john","Jane","scott","ian","jimmy","r2eq","mark","Just","rea3","Christos",
@@ -433,19 +435,34 @@ def main():
 
         if success:
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
+            if not upload_key:
+                raise RuntimeError("UPLOAD_KEY is required to upload Roblox sessions")
+            if not session_proxy:
+                raise RuntimeError("ROBLOX_SESSION_PROXY or PROXY is required by /api/roblox-sessions/import")
+            if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
+                raise RuntimeError(".ROBLOSECURITY cookie was not found in the browser session")
             
             response = requests.post(
-                "https://command.botted.org/api/create_session_with_cookie",
+                upload_url,
                 json={
-                    "Cookie": roblosecurity_cookie["value"]
+                    "cookie": roblosecurity_cookie["value"],
+                    "proxy": session_proxy,
                 },
                 headers={
                     "x-api-key": upload_key
-                }
+                },
+                timeout=30,
             )
 
-            if response.status_code == 200:
-                print("Cookie uploaded successfully.")
+            if 200 <= response.status_code < 300:
+                payload = response.json()
+                session = payload.get("session") or {}
+                print(
+                    "Cookie uploaded successfully.",
+                    f"session_id={session.get('session_id')}",
+                    f"username={session.get('username')}",
+                    f"status={session.get('status')}",
+                )
             else:
                 print(f"Failed to upload cookie: {response.status_code} - {response.text}")
         else:
