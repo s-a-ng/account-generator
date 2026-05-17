@@ -55,15 +55,6 @@ def secret_summary(value):
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
     return f"<set len={len(value)} sha256={digest}>"
 
-def proxy_summary(value):
-    if not value:
-        return "<missing>"
-    parsed = urlparse(value)
-    if parsed.hostname:
-        port = f":{parsed.port}" if parsed.port else ""
-        return f"{parsed.scheme or 'proxy'}://{parsed.hostname}{port}"
-    return secret_summary(value)
-
 def redacted_url(url):
     if not url:
         return "<unknown>"
@@ -227,7 +218,6 @@ def generate_random_birthdate():
 PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
 upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/roblox-sessions/import")
-session_proxy = os.getenv("ROBLOX_SESSION_PROXY") or os.getenv("PROXY")
 
 def validate_environment():
     missing = []
@@ -235,8 +225,6 @@ def validate_environment():
         missing.append("PASSWORD")
     if not upload_key:
         missing.append("UPLOAD_KEY")
-    if not session_proxy:
-        missing.append("ROBLOX_SESSION_PROXY or PROXY")
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
     log(
@@ -245,7 +233,6 @@ def validate_environment():
         upload_url=upload_url,
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
-        proxy=proxy_summary(session_proxy),
         artifacts=ARTIFACT_DIR,
     )
 
@@ -601,15 +588,12 @@ def main():
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
             if not upload_key:
                 raise RuntimeError("UPLOAD_KEY is required to upload Roblox sessions")
-            if not session_proxy:
-                raise RuntimeError("ROBLOX_SESSION_PROXY or PROXY is required by /api/roblox-sessions/import")
             if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
                 raise RuntimeError(".ROBLOSECURITY cookie was not found in the browser session")
 
             log(
                 "Uploading Roblox session",
                 upload_url=upload_url,
-                proxy=proxy_summary(session_proxy),
                 cookie=secret_summary(roblosecurity_cookie["value"]),
             )
             
@@ -617,7 +601,6 @@ def main():
                 upload_url,
                 json={
                     "cookie": roblosecurity_cookie["value"],
-                    "proxy": session_proxy,
                 },
                 headers={
                     "x-api-key": upload_key

@@ -28,8 +28,6 @@ jobs:
         env:
           UPLOAD_KEY: ${{ secrets.UPLOAD_KEY }}
           PASSWORD: ${{ secrets.PASSWORD }}
-          ROBLOX_SESSION_PROXY: ${{ secrets.ROBLOX_SESSION_PROXY }}
-          PROXY: ${{ secrets.PROXY }}
           GENERATOR_ARTIFACT_DIR: artifacts/generator
           PYTHONUNBUFFERED: "1"
         run: |
