@@ -217,7 +217,7 @@ def generate_random_birthdate():
 
 PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
-upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/roblox-sessions/import")
+upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/internal/roblox-sessions/import")
 
 def validate_environment():
     missing = []
@@ -603,7 +603,7 @@ def main():
                     "cookie": roblosecurity_cookie["value"],
                 },
                 headers={
-                    "x-api-key": upload_key
+                    "x-session-ingest-key": upload_key
                 },
                 timeout=30,
             )
