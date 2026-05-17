@@ -1,7 +1,9 @@
 
 import os
+import hashlib
 import requests
 import re
+import traceback
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
@@ -11,10 +13,108 @@ from pymailtm import Account
 import random, time
 import string
 import subprocess, atexit, signal
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 VIDEO_PATH   =  "9089uilbo0890"
 LOOPBACK_DEV = "pio;jk;jk;;2"
 _ffmpeg_proc = None
+ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
+CURRENT_STEP = "startup"
+
+def utc_timestamp():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def safe_field(value):
+    text = str(value)
+    return text.replace("\n", "\\n").replace("\r", "\\r")
+
+def log(message, **fields):
+    suffix = ""
+    if fields:
+        suffix = " " + " ".join(f"{key}={safe_field(value)}" for key, value in fields.items())
+    print(f"[{utc_timestamp()}] {message}{suffix}", flush=True)
+
+def set_step(name):
+    global CURRENT_STEP
+    CURRENT_STEP = name
+    log("STEP", name=name)
+
+def github_escape(value):
+    text = str(value)
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+def github_error(message):
+    if os.getenv("GITHUB_ACTIONS"):
+        print(f"::error::{github_escape(message)}", flush=True)
+
+def secret_summary(value):
+    if not value:
+        return "<missing>"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    return f"<set len={len(value)} sha256={digest}>"
+
+def proxy_summary(value):
+    if not value:
+        return "<missing>"
+    parsed = urlparse(value)
+    if parsed.hostname:
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme or 'proxy'}://{parsed.hostname}{port}"
+    return secret_summary(value)
+
+def redacted_url(url):
+    if not url:
+        return "<unknown>"
+    try:
+        parsed = urlparse(url)
+        query = "<redacted>" if parsed.query else ""
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, ""))
+    except Exception:
+        return "<unparseable-url>"
+
+def artifact_path(label, suffix):
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_") or "artifact"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return ARTIFACT_DIR / f"{stamp}-{safe_label}.{suffix}"
+
+def write_artifact(label, suffix, content):
+    path = artifact_path(label, suffix)
+    path.write_text(content, encoding="utf-8", errors="replace")
+    log("Saved artifact", path=path)
+    return path
+
+def save_browser_artifacts(driver, label):
+    if not driver:
+        return
+    try:
+        log("Browser state", url=redacted_url(driver.current_url), title=getattr(driver, "title", "<unknown>"))
+    except Exception as exc:
+        log("Could not read browser state", error=exc)
+    try:
+        screenshot = artifact_path(label, "png")
+        driver.save_screenshot(str(screenshot))
+        log("Saved browser screenshot", path=screenshot)
+    except Exception as exc:
+        log("Could not save browser screenshot", error=exc)
+    try:
+        write_artifact(f"{label}-page", "html", driver.page_source or "")
+    except Exception as exc:
+        log("Could not save page source", error=exc)
+
+def report_exception(context, exc, driver=None):
+    message = f"{context} failed during step '{CURRENT_STEP}': {type(exc).__name__}: {exc}"
+    log("ERROR", context=context, step=CURRENT_STEP, error=f"{type(exc).__name__}: {exc}")
+    github_error(message)
+    trace = traceback.format_exc()
+    print(trace, flush=True)
+    try:
+        write_artifact(f"{context}-traceback", "txt", trace)
+    except Exception:
+        pass
+    save_browser_artifacts(driver, f"{context}-{CURRENT_STEP}")
 
 def start_fake_webcam():
     global _ffmpeg_proc
@@ -48,6 +148,7 @@ def generateEmail(password):
     maxRetries = 3
     for attempt in range(maxRetries):
         try:
+            log("Fetching mail.tm domains", attempt=f"{attempt + 1}/{maxRetries}")
             domain_response = requests.get("https://api.mail.tm/domains", timeout=10)
             domain_response.raise_for_status()
             domains = domain_response.json().get('hydra:member', [])
@@ -67,6 +168,7 @@ def generateEmail(password):
             
             if account_response.status_code == 201:
                 account_data = account_response.json()
+                log("Created mail.tm account", address=address, account_id=account_data.get("id"))
                 
                 token_response = requests.post(
                     "https://api.mail.tm/token",
@@ -78,16 +180,27 @@ def generateEmail(password):
                     token = token_response.json().get("token")
                     if token:
                         return address, password, token, account_data['id']
+                log(
+                    "mail.tm token request failed",
+                    status=token_response.status_code,
+                    body=token_response.text[:500],
+                )
+            else:
+                log(
+                    "mail.tm account create failed",
+                    status=account_response.status_code,
+                    body=account_response.text[:500],
+                )
             
             if attempt < maxRetries - 1:
                 time.sleep(2)
                 
         except Exception as e:
-            print(f"Error creating email: {e}")
+            log("Error creating email", error=e, attempt=f"{attempt + 1}/{maxRetries}")
             if attempt < maxRetries - 1:
                 time.sleep(2)
 
-    raise Exception(f"Failed to create email after {maxRetries} attempts")
+    raise RuntimeError(f"Failed to create email after {maxRetries} attempts")
 
 
 USE_CHROME = False
@@ -115,6 +228,26 @@ PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
 upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/roblox-sessions/import")
 session_proxy = os.getenv("ROBLOX_SESSION_PROXY") or os.getenv("PROXY")
+
+def validate_environment():
+    missing = []
+    if not PASSWORD:
+        missing.append("PASSWORD")
+    if not upload_key:
+        missing.append("UPLOAD_KEY")
+    if not session_proxy:
+        missing.append("ROBLOX_SESSION_PROXY or PROXY")
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    log(
+        "Configuration loaded",
+        display=os.getenv("DISPLAY", "<missing>"),
+        upload_url=upload_url,
+        upload_key=secret_summary(upload_key),
+        password=secret_summary(PASSWORD),
+        proxy=proxy_summary(session_proxy),
+        artifacts=ARTIFACT_DIR,
+    )
 
 firstnames = [
     "john","Jane","scott","ian","jimmy","r2eq","mark","Just","rea3","Christos",
@@ -261,8 +394,8 @@ def kill_account_protection(drv):
 
 
     except Exception as e:
-        print("settings step failed:", e)
-        return False # solution: kill yourself - miller
+        report_exception("account-protection", e, drv)
+        return False
 
     print("Account protection successfully killed.") 
     return True
@@ -330,7 +463,7 @@ def verify_email_address(driver):
             match = re.search(r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+', body)
             if match:
                 link = match.group(0)
-                print(f"Verification link found: {link}")
+                log("Verification link found", url=redacted_url(link))
                 driver.get(link)
                 return True
             else:
@@ -373,67 +506,98 @@ def age_verify(driver):
         driver.switch_to.default_content()
 
 
-def poll_for_captcha(driver):
+def poll_for_captcha(driver, timeout_seconds=120):
+    started = time.time()
     while True: 
         if "https://www.roblox.com/home" in driver.current_url: 
             break
+        if time.time() - started > timeout_seconds:
+            raise TimeoutError(f"Timed out waiting for signup completion after {timeout_seconds}s")
 
         try:
             driver.find_element(By.CSS_SELECTOR, 'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]')
-            print("Detected captcha, done.")
-            driver.quit()
-            exit()
-        except Exception:
-            pass
+            raise RuntimeError("Detected Roblox captcha during signup")
+        except Exception as exc:
+            if isinstance(exc, RuntimeError):
+                raise
 
         try:
             driver.find_element(By.CSS_SELECTOR, 'div#GeneralErrorText[role="button"][aria-label="dismiss general error"]')
-            print("Detected general error, quitting.")
-            driver.quit()
-            exit()
-        except Exception:
-            pass
+            raise RuntimeError("Detected Roblox general signup error")
+        except Exception as exc:
+            if isinstance(exc, RuntimeError):
+                raise
+
+        time.sleep(0.5)
+
+def response_body_preview(response, max_chars=2000):
+    text = response.text or ""
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) > max_chars:
+        return text[:max_chars] + "...<truncated>"
+    return text
+
+def parse_upload_payload(response):
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Upload returned non-JSON response: status={response.status_code} "
+            f"content_type={response.headers.get('content-type')} "
+            f"body={response_body_preview(response)}"
+        ) from exc
 
 
 def main():
   #  start_fake_webcam()
+    driver = None
 
-    if USE_CHROME:
-        import undetected_chromedriver as uc
-        opts = uc.ChromeOptions()
-        opts.add_argument("--use-fake-ui-for-media-stream")
-        driver = uc.Chrome(options=opts)
-    else:
-        from undetected_geckodriver import Firefox
-        from selenium.webdriver.firefox.options import Options as FxOptions
-        opts = FxOptions()
-        opts.set_preference("permissions.default.camera", 1)
-        opts.set_preference("permissions.default.microphone", 1)
-        opts.set_preference("media.navigator.permission.disabled", True)
-        opts.set_preference("media.getusermedia.insecure.enabled", True)
-        driver = Firefox(options=opts)
-        
     try:
-        print("Browser initialized.") 
-        driver.get("https://www.roblox.com/CreateAccount")
-        print("Accessed Roblox account creation page.") 
+        set_step("validate-environment")
+        validate_environment()
+        if USE_CHROME:
+            set_step("browser-start-chrome")
+            import undetected_chromedriver as uc
+            opts = uc.ChromeOptions()
+            opts.add_argument("--use-fake-ui-for-media-stream")
+            driver = uc.Chrome(options=opts)
+        else:
+            set_step("browser-start-firefox")
+            from undetected_geckodriver import Firefox
+            from selenium.webdriver.firefox.options import Options as FxOptions
+            opts = FxOptions()
+            opts.set_preference("permissions.default.camera", 1)
+            opts.set_preference("permissions.default.microphone", 1)
+            opts.set_preference("media.navigator.permission.disabled", True)
+            opts.set_preference("media.getusermedia.insecure.enabled", True)
+            driver = Firefox(options=opts)
 
+        log("Browser initialized")
+        set_step("open-signup")
+        driver.get("https://www.roblox.com/CreateAccount")
+        log("Accessed Roblox account creation page", url=redacted_url(driver.current_url))
+
+        set_step("fill-signup")
         fill_out_page(driver)
 
+        set_step("wait-signup-result")
         poll_for_captcha(driver)
 
+        set_step("account-protection")
         success = kill_account_protection(driver)
 
+        set_step("email-verification")
         verified = verify_email_address(driver)
 
         if verified:
-            print("Email verified.")
+            print("Email verified.", flush=True)
         else:
-            print("Email verification failed.")
+            print("Email verification failed.", flush=True)
 
         age_verified = False # age_verify(driver)
 
         if success:
+            set_step("session-upload")
             roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
             if not upload_key:
                 raise RuntimeError("UPLOAD_KEY is required to upload Roblox sessions")
@@ -441,6 +605,13 @@ def main():
                 raise RuntimeError("ROBLOX_SESSION_PROXY or PROXY is required by /api/roblox-sessions/import")
             if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
                 raise RuntimeError(".ROBLOSECURITY cookie was not found in the browser session")
+
+            log(
+                "Uploading Roblox session",
+                upload_url=upload_url,
+                proxy=proxy_summary(session_proxy),
+                cookie=secret_summary(roblosecurity_cookie["value"]),
+            )
             
             response = requests.post(
                 upload_url,
@@ -454,26 +625,42 @@ def main():
                 timeout=30,
             )
 
+            log(
+                "Upload response received",
+                status=response.status_code,
+                content_type=response.headers.get("content-type"),
+                body=response_body_preview(response),
+            )
+
             if 200 <= response.status_code < 300:
-                payload = response.json()
+                payload = parse_upload_payload(response)
                 session = payload.get("session") or {}
                 print(
                     "Cookie uploaded successfully.",
                     f"session_id={session.get('session_id')}",
                     f"username={session.get('username')}",
                     f"status={session.get('status')}",
+                    flush=True,
                 )
             else:
-                print(f"Failed to upload cookie: {response.status_code} - {response.text}")
+                raise RuntimeError(
+                    f"Failed to upload cookie: status={response.status_code} "
+                    f"body={response_body_preview(response)}"
+                )
         else:
+            log("Account protection failed; retrying with a fresh browser")
             driver.quit() 
             main()
             return
+    except Exception as exc:
+        report_exception("generator", exc, driver)
+        raise
     finally:
         try:
-            driver.quit()
-        except:
-            print("program closed, but webdriver already shutdown")
+            if driver:
+                driver.quit()
+        except Exception:
+            print("program closed, but webdriver already shutdown", flush=True)
 
 while True: 
     try: 

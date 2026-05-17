@@ -28,6 +28,18 @@ jobs:
         env:
           UPLOAD_KEY: ${{ secrets.UPLOAD_KEY }}
           PASSWORD: ${{ secrets.PASSWORD }}
+          ROBLOX_SESSION_PROXY: ${{ secrets.ROBLOX_SESSION_PROXY }}
+          PROXY: ${{ secrets.PROXY }}
+          GENERATOR_ARTIFACT_DIR: artifacts/generator
+          PYTHONUNBUFFERED: "1"
         run: |
           echo $UID > /proc/self/loginuid
-          DISPLAY=:99 python ./scripts/generate/firefox.py
+          DISPLAY=:99 python -u ./scripts/generate/firefox.py
+
+      - name: Upload generator diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generator-diagnostics
+          path: artifacts/generator
+          if-no-files-found: ignore
