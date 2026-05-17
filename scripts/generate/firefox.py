@@ -78,7 +78,7 @@ def write_artifact(label, suffix, content):
     return path
 
 def save_browser_artifacts(driver, label):
-    if not driver:
+    if driver is None:
         return
     try:
         log("Browser state", url=redacted_url(driver.current_url), title=getattr(driver, "title", "<unknown>"))
