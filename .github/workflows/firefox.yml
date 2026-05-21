@@ -2,6 +2,15 @@ name: firefox
 
 on:
   workflow_dispatch:
+    inputs:
+      ingest_division:
+        description: Roblox session division
+        required: true
+        default: default
+      ingest_pool:
+        description: Roblox session pool
+        required: true
+        default: global
 
 jobs:
   build:
@@ -28,6 +37,8 @@ jobs:
         env:
           UPLOAD_KEY: ${{ secrets.UPLOAD_KEY }}
           PASSWORD: ${{ secrets.PASSWORD }}
+          ROBLOX_SESSION_INGEST_DIVISION: ${{ inputs.ingest_division }}
+          ROBLOX_SESSION_INGEST_POOL: ${{ inputs.ingest_pool }}
           GENERATOR_ARTIFACT_DIR: artifacts/generator
           PYTHONUNBUFFERED: "1"
         run: |

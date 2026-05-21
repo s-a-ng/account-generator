@@ -218,6 +218,9 @@ def generate_random_birthdate():
 PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
 upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/internal/roblox-sessions/import")
+upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip() or "default"
+upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
+POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 def validate_environment():
     missing = []
@@ -227,10 +230,16 @@ def validate_environment():
         missing.append("UPLOAD_KEY")
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    if len(upload_division) > 64:
+        raise RuntimeError("ROBLOX_SESSION_INGEST_DIVISION must be 64 characters or fewer")
+    if upload_pool == "project" or not POOL_NAME_PATTERN.match(upload_pool):
+        raise RuntimeError("ROBLOX_SESSION_INGEST_POOL must use lowercase letters, numbers, underscores, or hyphens")
     log(
         "Configuration loaded",
         display=os.getenv("DISPLAY", "<missing>"),
         upload_url=upload_url,
+        ingest_division=upload_division,
+        ingest_pool=upload_pool,
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
         artifacts=ARTIFACT_DIR,
@@ -594,6 +603,8 @@ def main():
             log(
                 "Uploading Roblox session",
                 upload_url=upload_url,
+                ingest_division=upload_division,
+                ingest_pool=upload_pool,
                 cookie=secret_summary(roblosecurity_cookie["value"]),
             )
             
@@ -601,6 +612,8 @@ def main():
                 upload_url,
                 json={
                     "cookie": roblosecurity_cookie["value"],
+                    "division": upload_division,
+                    "pool": upload_pool,
                 },
                 headers={
                     "x-session-ingest-key": upload_key
