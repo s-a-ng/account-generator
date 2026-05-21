@@ -65,6 +65,16 @@ def redacted_url(url):
     except Exception:
         return "<unparseable-url>"
 
+def env_float(name, default):
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than zero")
+    return value
+
 def artifact_path(label, suffix):
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_") or "artifact"
@@ -221,6 +231,7 @@ upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/internal/ro
 upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip() or "default"
 upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
 
 def validate_environment():
     missing = []
@@ -240,6 +251,7 @@ def validate_environment():
         upload_url=upload_url,
         ingest_division=upload_division,
         ingest_pool=upload_pool,
+        upload_enqueue_timeout_seconds=upload_enqueue_timeout_seconds,
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
         artifacts=ARTIFACT_DIR,
@@ -543,6 +555,46 @@ def parse_upload_payload(response):
             f"body={response_body_preview(response)}"
         ) from exc
 
+def upload_session_cookie(cookie):
+    headers = {"x-session-ingest-key": upload_key}
+    response = requests.post(
+        upload_url,
+        json={
+            "cookie": cookie,
+            "division": upload_division,
+            "pool": upload_pool,
+        },
+        headers=headers,
+        timeout=upload_enqueue_timeout_seconds,
+    )
+
+    log(
+        "Upload response received",
+        status=response.status_code,
+        content_type=response.headers.get("content-type"),
+        body=response_body_preview(response),
+    )
+
+    payload = parse_upload_payload(response)
+    if response.status_code == 202:
+        job = payload.get("job") or {}
+        status_url = job.get("status_url") or response.headers.get("location")
+        log(
+            "Roblox session import queued",
+            job_id=job.get("id") or "<unknown>",
+            status=job.get("status") or "<unknown>",
+            status_url=status_url or "<missing>",
+        )
+        return payload
+
+    if 200 <= response.status_code < 300:
+        return payload
+
+    raise RuntimeError(
+        f"Failed to upload cookie: status={response.status_code} "
+        f"body={response_body_preview(response)}"
+    )
+
 
 def main():
   #  start_fake_webcam()
@@ -608,29 +660,9 @@ def main():
                 cookie=secret_summary(roblosecurity_cookie["value"]),
             )
             
-            response = requests.post(
-                upload_url,
-                json={
-                    "cookie": roblosecurity_cookie["value"],
-                    "division": upload_division,
-                    "pool": upload_pool,
-                },
-                headers={
-                    "x-session-ingest-key": upload_key
-                },
-                timeout=30,
-            )
-
-            log(
-                "Upload response received",
-                status=response.status_code,
-                content_type=response.headers.get("content-type"),
-                body=response_body_preview(response),
-            )
-
-            if 200 <= response.status_code < 300:
-                payload = parse_upload_payload(response)
-                session = payload.get("session") or {}
+            payload = upload_session_cookie(roblosecurity_cookie["value"])
+            session = payload.get("session") or {}
+            if session:
                 print(
                     "Cookie uploaded successfully.",
                     f"session_id={session.get('session_id')}",
@@ -639,9 +671,13 @@ def main():
                     flush=True,
                 )
             else:
-                raise RuntimeError(
-                    f"Failed to upload cookie: status={response.status_code} "
-                    f"body={response_body_preview(response)}"
+                job = payload.get("job") or {}
+                print(
+                    "Cookie import queued.",
+                    f"job_id={job.get('id')}",
+                    f"status={job.get('status')}",
+                    f"status_url={job.get('status_url')}",
+                    flush=True,
                 )
         else:
             log("Account protection failed; retrying with a fresh browser")
