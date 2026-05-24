@@ -258,46 +258,56 @@ def validate_environment():
     )
 
 firstnames = [
-    "john","Jane","scott","ian","jimmy","r2eq","mark","Just","rea3","Christos",
+    "untitled","cute","john","Jane","scott","ian","jimmy","r2eq","mark","Just","rea3","christos",
     "opan","scar","Gluerell","pixel","skib","george","ahmad","Unu","neo","luna",
     "Max","zero","nova","echo","kai","drip","ace","blitz","rex","niko","vex","lex",
     "rami","theo","dino","mira","nash","pyro","juno","aria","zane","finn","tara",
     "omar","riley","zyro","cyn","ash","chloe","brynn","milo","toby","ezra","axel",
     "vale","skye","ryn","dusk","jett","haze","emi","kora","lio","nira","kane",
     "drew","rook","blair","jax","novae","rune","faye","lars","tess","mika","rei",
-    "zeph","cole","timo","grey","wren","arlo","lux","bree","seth","remi","vera",
-    "zion","maddie","eli","rhea","nox","ivy","kace","lark","nemo","arden","ty","l0g","c4de","mist","oz"
+    "zeph","cole","timo","grey","wren","arlo","lux","bree","seth","remi","vera","s1dney",
+    "zion","maddie","eli","rhea","nox","ivy","kace","lark","nemo","arden","ty","l0g","mist","oz"
 ]
 
 middlenames = [
-    "_3","the4","And5","men1","664","S1dney","sl33per","simpon","bee","DJd33",
-    "wil12","Van","bayar","zz","404","xX","pro","Dev","dark","_the","v2","exe",
-    "_bot","999","666","777","XL","jr","onfire","Ultra","beta","alpha","Core",
-    "_real","dat","meta","neo","micro","Macro","prime","alt","0","01","02","x",
-    "xx","XXX","low","High","deep","Fast","slow","Cold","hot","void","Doom",
-    "space","Tech","iron","Ghost","night","Sun","moon","Cloud","air","Fire","ice",
-    "earth","Stone","dust","Wave","warp","Hyper","cyber","Ninja","mage","Tank",
-    "sn1p3","Aim","shot","blast","botz","Droid","Sys","port","Root"
+    "_3","the4","And5","men1","664","sl33per","bee","DJd33",
+    "wil12","Van","404","xX","pro","dev","dark","_the","v2","exe",
+    "_bot","999","777","XL","jr","onfire","ultra","beta","alpha","core",
+    "_real","dat","meta","neo","micro","macro","prime","alt","0","01","02","x",
+    "xx","XXX","low","high","deep","fast","slow","Cold","hot","void",
+    "space","tech","iron","night","moon","cloud","air","fire","ice",
+    "earth","atone","dust","Wave","warp","Hyper","cyber","ninja","mage","tank",
+    "sn1p3","aim","shot","blast","droid","sys","port"
 ]
 
 lastnames = [
-    "itius","inion","Ion","Ian","xd","xD","II","Th","v","Rum","cache","0251",
-    "kai","Walls","14","00","AS","capybara","sammy","Lord","Master","Core","Byte",
-    "sync","Zero","nix","Burn","dust","Nova","storm","Lite","Rise","loop","man",
-    "x","99","Zone","code","Crash","void","Cube","Stack","Flow","drop","End","fox",
-    "Owl","wolf","Hawk","bear","Bee","Fish","Whale","lion","Panther","Tiger",
-    "crow","Ghost","shade","Spark","Flame","Ray","Drake","snake","Spider","cube",
-    "Data","file","Gate","link","Net","Mode","prog","Clip","Cast","shot","Band",
-    "Play","jam","Spin","wave","mix","Hack","crpt","corex","unit","Rider","sig",
-    "Stormz","Sparkz","Darkz","Lightz","Plus","Prime","Seed","Dusty","Voidy","Mind"
+    "itius","inion","ion","ian","xd","xD","II","rum","cache",
+    "kai","walls","14","00","AS","capybara","sammy","lord",
+    "sync","zero","nix","burn","dust","Nova","storm","lite","rise","loop","man",
+    "x","99","zone","code","crash","void","cube","stack","flow","drop","end","fox",
+    "Owl","wolf","hawk","bear","bee","fish","whale","lion","panther","tiger",
+    "crow","ghost","shade","spark","flame","ray","drake","snake","spider","cube",
+    "data","file","gate","link","net","mode","prog","clip","cast","shot","band",
+    "play","jam","spin","wave","corex","unit","rider","sig",
+    "stormz","sparkz","darkz","lightz","plus","prime","seed","dusty","voidy","mind"
 ]
 
-#print("total combinations", len(firstnames) * len(middlenames) * len(lastnames) * 9 * 9 * 9)
-
 def generate_username():
-    firstname = random.randint(1,10000) == 1 and "shownape" or random.choice(firstnames)
-    return firstname + random.choice(middlenames) + random.choice(lastnames) + str(random.randint(1, 999))
-        
+    first_name = random.randint(1,10000) == 1 and "shownape" or random.choice(firstnames)
+    middle_name = random.randint(1,2) == 1 and "" or random.choice(middlenames)
+    last_name = random.choice(lastnames)
+
+    first_name = random.randint(1,3) == 1 and first_name.capitalize() or first_name 
+    
+    has_num_suffix = random.randint(1,3) == 1
+    
+    suffix = ""
+    if has_num_suffix:
+        for i in range(random.randint(1, 3)):
+            suffix +=  str(random.randint(0, 9)) 
+    
+    return first_name + middle_name + last_name + suffix
+    
 
 def random_sleep(min = 0.3, max = 0.8):
     time.sleep(random.uniform(min, max))
