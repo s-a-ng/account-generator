@@ -1,23 +1,26 @@
 
 import os
 import hashlib
+import getpass
 import requests
 import re
-import traceback
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
-from pymailtm import Account
-
-import random, time
+import random
+import signal
 import string
-import subprocess, atexit, signal
+import subprocess
+import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-VIDEO_PATH   =  "9089uilbo0890"
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import Select, WebDriverWait
+from pymailtm import Account
+
+VIDEO_PATH = "9089uilbo0890"
 LOOPBACK_DEV = "pio;jk;jk;;2"
 _ffmpeg_proc = None
 ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
@@ -137,10 +140,10 @@ def stop_fake_webcam():
     global _ffmpeg_proc
     if _ffmpeg_proc and _ffmpeg_proc.poll() is None:
         _ffmpeg_proc.send_signal(signal.SIGINT)
-        try: _ffmpeg_proc.wait(timeout=3)
-        except subprocess.TimeoutExpired: _ffmpeg_proc.kill()
-
-#atexit.register(stop_fake_webcam)
+        try:
+            _ffmpeg_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            _ffmpeg_proc.kill()
 
 def generateUsername():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
@@ -206,9 +209,6 @@ def generateEmail(password):
 
 USE_CHROME = False
 
-
-import getpass
-
 try:
     os.getlogin()
 except OSError:
@@ -257,56 +257,363 @@ def validate_environment():
         artifacts=ARTIFACT_DIR,
     )
 
-firstnames = [
-    "untitled","cute","john","Jane","scott","ian","jimmy","r2eq","mark","Just","rea3","christos",
-    "opan","scar","Gluerell","pixel","skib","george","ahmad","Unu","neo","luna",
-    "Max","zero","nova","echo","kai","drip","ace","blitz","rex","niko","vex","lex",
-    "rami","theo","dino","mira","nash","pyro","juno","aria","zane","finn","tara",
-    "omar","riley","zyro","cyn","ash","chloe","brynn","milo","toby","ezra","axel",
-    "vale","skye","ryn","dusk","jett","haze","emi","kora","lio","nira","kane",
-    "drew","rook","blair","jax","novae","rune","faye","lars","tess","mika","rei",
-    "zeph","cole","timo","grey","wren","arlo","lux","bree","seth","remi","vera","s1dney",
-    "zion","maddie","eli","rhea","nox","ivy","kace","lark","nemo","arden","ty","l0g","mist","oz"
+USERNAME_STYLE = (os.getenv("USERNAME_STYLE", "varied") or "varied").strip().lower()
+USERNAME_LENGTH = (os.getenv("USERNAME_LENGTH", "varied") or "varied").strip().lower()
+USERNAME_KEYWORD = re.sub(r"[^A-Za-z0-9_]", "", (os.getenv("USERNAME_KEYWORD", "") or "")).strip("_")
+
+STYLE_BANK = {
+    "cool": [
+        "vibe", "drift", "nova", "blitz", "flux", "frost", "pulse", "zen", "orbit", "wave",
+        "glide", "aero", "chrome", "dash", "snap", "volt", "prism", "luxe", "sonic", "slick",
+    ],
+    "funny": [
+        "bruh", "goober", "bonk", "yeet", "meme", "noob", "boing", "lol", "wobble", "bloop",
+        "derp", "quack", "snacc", "giggle", "toasty", "beans", "blorp", "snort", "zany", "bouncy",
+    ],
+    "tryhard": [
+        "clutch", "sweat", "frag", "sn1pe", "rank", "mvp", "aim", "grind", "carry", "pro",
+        "streak", "flick", "combo", "meta", "peak", "strat", "squad", "focus", "sharp", "elite",
+    ],
+    "aesthetic": [
+        "luna", "velvet", "petal", "mist", "cloud", "bloom", "echo", "glow", "dawn", "ivy",
+        "amber", "lotus", "silk", "aurora", "satin", "honey", "flora", "blush", "opal", "meadow",
+    ],
+    "edgy": [
+        "void", "reaper", "shadow", "venom", "wraith", "crypt", "hex", "night", "grim", "nox",
+        "thorn", "fang", "raven", "vanta", "onyx", "ember", "eclipse", "rift", "sable", "dread",
+    ],
+    "og": [
+        "king", "lord", "prime", "stone", "iron", "hawk", "wolf", "ghost", "zero", "ace",
+        "nova", "viper", "frost", "storm", "hero", "chief", "titan", "blaze", "rider", "cypher",
+    ],
+    "anime": [
+        "kage", "shin", "yami", "sora", "ren", "akira", "hikari", "ryu", "tora", "yuki",
+        "kami", "kuro", "raiden", "ichi", "nami", "haru", "aoi", "rin", "kaori", "itsu",
+    ],
+    "gaming": [
+        "gg", "spawn", "pixel", "quest", "raid", "core", "xp", "legend", "boss", "arcade",
+        "arena", "respawn", "match", "sprint", "score", "boost", "lobby", "drop", "loot", "combo",
+    ],
+}
+
+STYLE_DECORATORS = {
+    "cool": ["x", "v2", "official", "real"],
+    "funny": ["lol", "haha", "bruh", "ez"],
+    "tryhard": ["yt", "ttv", "fn", "op", "god"],
+    "aesthetic": ["xo", "ia", "ly", "dream"],
+    "edgy": ["x", "13", "666", "rx", "vx"],
+    "og": ["ii", "iv", "x", "prime"],
+    "anime": ["chan", "kun", "senpai", "sama"],
+    "gaming": ["yt", "tv", "gg", "pro"],
+}
+
+STYLE_PREFIXES = {
+    "cool": ["neo", "ultra", "astro", "mono"],
+    "funny": ["big", "mr", "lol", "sir"],
+    "tryhard": ["x", "op", "max", "pro"],
+    "aesthetic": ["soft", "moon", "rose", "dear"],
+    "edgy": ["dark", "night", "void", "x"],
+    "og": ["i", "the", "old", "real"],
+    "anime": ["shin", "kuro", "aka", "neo"],
+    "gaming": ["play", "game", "pro", "zone"],
+}
+
+STYLE_SUFFIXES = {
+    "cool": ["x", "sync", "wave", "zone"],
+    "funny": ["lol", "time", "vibes", "mode"],
+    "tryhard": ["yt", "tv", "op", "fps"],
+    "aesthetic": ["ia", "ly", "dream", "aura"],
+    "edgy": ["x", "rx", "vx", "13"],
+    "og": ["x", "ii", "prime", "one"],
+    "anime": ["kun", "chan", "sama", "kai"],
+    "gaming": ["gg", "hub", "pro", "tv"],
+}
+
+GLOBAL_TOKENS = [
+    "alpha", "beta", "gamma", "omega", "delta", "sigma", "prime", "ultra", "hyper", "nexus",
+    "byte", "zen", "spark", "drift", "swift", "lumen", "striker", "pixel", "echo", "vanta",
 ]
 
-middlenames = [
-    "_3","the4","And5","men1","664","sl33per","bee","DJd33",
-    "wil12","Van","404","xX","pro","dev","dark","_the","v2","exe",
-    "_bot","999","777","XL","jr","onfire","ultra","beta","alpha","core",
-    "_real","dat","meta","neo","micro","macro","prime","alt","0","01","02","x",
-    "xx","XXX","low","high","deep","fast","slow","Cold","hot","void",
-    "space","tech","iron","night","moon","cloud","air","fire","ice",
-    "earth","atone","dust","Wave","warp","Hyper","cyber","ninja","mage","tank",
-    "sn1p3","aim","shot","blast","droid","sys","port"
+NUMERIC_SUFFIXES = [
+    "7", "8", "9", "11", "13", "21", "24", "27", "33", "42", "64", "66", "77", "88", "99",
+    "007", "101", "404", "808", "909", "2026",
 ]
 
-lastnames = [
-    "itius","inion","ion","ian","xd","xD","II","rum","cache",
-    "kai","walls","14","00","AS","capybara","sammy","lord",
-    "sync","zero","nix","burn","dust","Nova","storm","lite","rise","loop","man",
-    "x","99","zone","code","crash","void","cube","stack","flow","drop","end","fox",
-    "Owl","wolf","hawk","bear","bee","fish","whale","lion","panther","tiger",
-    "crow","ghost","shade","spark","flame","ray","drake","snake","spider","cube",
-    "data","file","gate","link","net","mode","prog","clip","cast","shot","band",
-    "play","jam","spin","wave","corex","unit","rider","sig",
-    "stormz","sparkz","darkz","lightz","plus","prime","seed","dusty","voidy","mind"
+LETTER_ONSETS = [
+    "b", "br", "c", "cr", "d", "dr", "f", "fl", "g", "gr", "h", "k", "kr", "l", "m", "n",
+    "p", "pr", "r", "s", "sk", "st", "t", "tr", "v", "z"
 ]
+LETTER_NUCLEI = ["a", "e", "i", "o", "u", "ae", "ia", "io", "ou", "ei"]
+LETTER_CODAS = ["n", "x", "r", "s", "th", "k", "m", "z", "rd", "nt", "sh", "ve", "l"]
+
+STYLE_ALIASES = {
+    "og/classic": "og",
+    "classic": "og",
+}
+
+VALID_STYLES = tuple(STYLE_BANK.keys())
+RECENT_USERNAMES = []
+RECENT_USERNAME_LIMIT = 3000
+
+
+def _normalize_style(style):
+    style = (style or "varied").strip().lower()
+    style = STYLE_ALIASES.get(style, style)
+    if style == "varied":
+        return random.choice(VALID_STYLES)
+    if style in VALID_STYLES:
+        return style
+    return random.choice(VALID_STYLES)
+
+
+def _target_length_profile():
+    if USERNAME_LENGTH == "short":
+        return 3, 8, random.randint(6, 8)
+    if USERNAME_LENGTH == "medium":
+        return 9, 14, random.randint(11, 14)
+    if USERNAME_LENGTH == "long":
+        return 15, 20, random.randint(16, 20)
+
+    # Favor medium-long and long outputs by default.
+    bucket = random.choices(["short", "medium", "long"], weights=[8, 32, 60], k=1)[0]
+    ranges = {
+        "short": (3, 8, random.randint(6, 8)),
+        "medium": (9, 14, random.randint(12, 14)),
+        "long": (15, 20, random.randint(17, 20)),
+    }
+    return ranges[bucket]
+
+
+def _sanitize_username(candidate):
+    sanitized = re.sub(r"[^A-Za-z0-9_]", "", candidate)
+    sanitized = re.sub(r"_+", "_", sanitized)
+    sanitized = sanitized.strip("_")
+    return sanitized[:20]
+
+
+def _valid_username(candidate):
+    if len(candidate) < 3 or len(candidate) > 20:
+        return False
+    if not re.match(r"^[A-Za-z0-9_]+$", candidate):
+        return False
+    if candidate.startswith("_") or candidate.endswith("_"):
+        return False
+    if "__" in candidate:
+        return False
+    if re.search(r"(.)\1\1\1", candidate.lower()):
+        return False
+    return True
+
+
+def _syllable_word(syllables=None):
+    count = syllables if syllables is not None else random.choice([2, 2, 3])
+    chunks = []
+    for _ in range(count):
+        chunks.append(
+            random.choice(LETTER_ONSETS) + random.choice(LETTER_NUCLEI) + random.choice(LETTER_CODAS)
+        )
+    return "".join(chunks)
+
+
+def _stylize_case(value, style):
+    if not value:
+        return value
+    mode = random.choice(["lower", "pascal", "camel", "mixed"])
+    if style in ("og", "aesthetic") and random.randint(1, 100) <= 70:
+        mode = random.choice(["pascal", "camel"])
+    if mode == "lower":
+        return value.lower()
+    if mode == "pascal":
+        return value[:1].upper() + value[1:].lower()
+    if mode == "camel":
+        return value[:1].lower() + value[1:].capitalize()
+
+    chars = []
+    for ch in value:
+        if ch.isalpha() and random.randint(1, 100) <= 28:
+            chars.append(ch.upper())
+        else:
+            chars.append(ch.lower())
+    return "".join(chars)
+
+
+def _apply_leet(value, style):
+    if style not in ("edgy", "tryhard", "gaming"):
+        return value
+    if random.randint(1, 100) > 35:
+        return value
+    swaps = {"a": "4", "e": "3", "i": "1", "o": "0", "s": "5", "t": "7"}
+    chars = []
+    for ch in value:
+        lower = ch.lower()
+        if lower in swaps and random.randint(1, 100) <= 40:
+            chars.append(swaps[lower])
+        else:
+            chars.append(ch)
+    return "".join(chars)
+
+
+def _pick_keyword():
+    if USERNAME_KEYWORD:
+        return _sanitize_username(USERNAME_KEYWORD.lower())[:10]
+    return ""
+
+
+def _mutate_token(token):
+    mode = random.choice(["none", "trim", "voweldrop", "doubleend"])
+    if mode == "none":
+        return token
+    if mode == "trim" and len(token) > 4:
+        return token[:-1]
+    if mode == "voweldrop" and len(token) > 4:
+        return re.sub(r"[aeiou]", "", token, count=1)
+    if mode == "doubleend" and len(token) >= 3:
+        return token + token[-1]
+    return token
+
+
+def _build_core(style, keyword):
+    bank = STYLE_BANK[style]
+    other_style = _normalize_style("varied")
+    generated = _syllable_word(random.choice([2, 2, 3, 3, 4]))
+    generated_short = _syllable_word(random.choice([1, 2]))
+    word_a = _mutate_token(random.choice(bank))
+    word_b = _mutate_token(random.choice(bank))
+    word_c = _mutate_token(random.choice(STYLE_BANK[other_style]))
+    global_word = _mutate_token(random.choice(GLOBAL_TOKENS))
+    prefix = random.choice(STYLE_PREFIXES[style])
+    suffix = random.choice(STYLE_SUFFIXES[style])
+    number = random.choice(NUMERIC_SUFFIXES)
+
+    templates = [
+        ("bank_bank", 7),
+        ("bank_bank_bank", 16),
+        ("bank_generated", 8),
+        ("generated_bank", 8),
+        ("generated_generated", 10),
+        ("prefix_bank_suffix", 13),
+        ("global_bank", 6),
+        ("bank_global", 6),
+        ("bank_number", 7),
+        ("bank_crossstyle", 9),
+        ("generated_crossstyle", 10),
+        ("keyword_bank", 5),
+        ("bank_keyword", 5),
+        ("keyword_generated", 6),
+        ("generated_keyword", 6),
+    ]
+    if not keyword:
+        templates = [tpl for tpl in templates if not tpl[0].startswith("keyword")]
+        templates = [tpl for tpl in templates if not tpl[0].endswith("keyword")]
+
+    template = random.choices([tpl[0] for tpl in templates], weights=[tpl[1] for tpl in templates], k=1)[0]
+
+    if template == "bank_bank":
+        parts = [word_a, word_b]
+    elif template == "bank_bank_bank":
+        parts = [word_a, word_b, word_c]
+    elif template == "bank_generated":
+        parts = [word_a, generated]
+    elif template == "generated_bank":
+        parts = [generated, word_a]
+    elif template == "generated_generated":
+        parts = [generated_short, generated]
+    elif template == "prefix_bank_suffix":
+        parts = [prefix, word_a, suffix]
+    elif template == "global_bank":
+        parts = [global_word, word_a]
+    elif template == "bank_global":
+        parts = [word_a, global_word]
+    elif template == "bank_number":
+        parts = [word_a, number]
+    elif template == "bank_crossstyle":
+        parts = [word_a, word_c]
+    elif template == "generated_crossstyle":
+        parts = [generated, word_c]
+    elif template == "keyword_bank":
+        parts = [keyword, word_a]
+    elif template == "bank_keyword":
+        parts = [word_a, keyword]
+    elif template == "keyword_generated":
+        parts = [keyword, generated]
+    elif template == "generated_keyword":
+        parts = [generated, keyword]
+    else:
+        parts = [word_a, generated]
+
+    sep = random.choices(["", "_"], weights=[78, 22], k=1)[0]
+    return sep.join(part for part in parts if part)
+
+
+def _length_fit(candidate, min_len, max_len, target_len, style):
+    candidate = _sanitize_username(candidate)
+    decorators = STYLE_DECORATORS[style]
+    suffixes = STYLE_SUFFIXES[style]
+    prefixes = STYLE_PREFIXES[style]
+
+    while len(candidate) < target_len:
+        mode = random.choice(["digits", "decorator", "word", "global", "affix"])
+        if mode == "digits":
+            candidate += random.choice(NUMERIC_SUFFIXES)
+        elif mode == "decorator":
+            extra = random.choice(decorators)
+            candidate = f"{candidate}_{extra}" if random.randint(1, 100) <= 35 else f"{candidate}{extra}"
+        elif mode == "global":
+            candidate += random.choice(GLOBAL_TOKENS)[: random.choice([2, 3, 4])]
+        elif mode == "affix":
+            if random.randint(1, 100) <= 50:
+                candidate = f"{random.choice(prefixes)}{candidate}"
+            else:
+                candidate = f"{candidate}{random.choice(suffixes)}"
+        else:
+            candidate += random.choice(STYLE_BANK[style])[: random.choice([2, 3, 4])]
+        candidate = _sanitize_username(candidate)
+
+        # If we crossed target but are still under hard min, keep filling.
+        if len(candidate) >= target_len and len(candidate) >= min_len:
+            break
+
+    if len(candidate) > max_len:
+        trimmed = candidate[:max_len]
+        trimmed = _sanitize_username(trimmed)
+        if len(trimmed) >= 3:
+            return trimmed
+        return candidate[:max_len]
+
+    return candidate
+
 
 def generate_username():
-    first_name = random.randint(1,10000) == 1 and "shownape" or random.choice(firstnames)
-    middle_name = random.randint(1,2) == 1 and "" or random.choice(middlenames)
-    last_name = random.choice(lastnames)
+    min_len, max_len, target_len = _target_length_profile()
+    keyword = _pick_keyword()
 
-    first_name = random.randint(1,3) == 1 and first_name.capitalize() or first_name 
-    
-    has_num_suffix = random.randint(1,3) == 1
-    
-    suffix = ""
-    if has_num_suffix:
-        for i in range(random.randint(1, 3)):
-            suffix +=  str(random.randint(0, 9)) 
-    
-    return first_name + middle_name + last_name + suffix
+    for _ in range(400):
+        style = _normalize_style(USERNAME_STYLE)
+        base = _build_core(style, keyword)
+
+        if random.randint(1, 100) <= 30:
+            base = f"{base}_{random.choice(STYLE_DECORATORS[style])}"
+
+        if random.randint(1, 100) <= 25:
+            base += random.choice(NUMERIC_SUFFIXES)
+
+        base = _apply_leet(base, style)
+        base = _stylize_case(base, style)
+        candidate = _length_fit(base, min_len, max_len, target_len, style)
+        candidate = _sanitize_username(candidate)
+
+        if not _valid_username(candidate):
+            continue
+        if candidate in RECENT_USERNAMES:
+            continue
+
+        RECENT_USERNAMES.append(candidate)
+        if len(RECENT_USERNAMES) > RECENT_USERNAME_LIMIT:
+            RECENT_USERNAMES.pop(0)
+        return candidate
+
+    fallback = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(6, 12)))
+    return fallback
     
 
 def random_sleep(min = 0.3, max = 0.8):
@@ -314,50 +621,49 @@ def random_sleep(min = 0.3, max = 0.8):
 
 def fill_out_page(driver):
     month, day, year = generate_random_birthdate()
-    print(f"Generated birthdate: {month} {day}, {year}") 
+    print(f"Generated birthdate: {month} {day}, {year}")
 
     month_select = Select(driver.find_element(By.ID, "MonthDropdown"))
     month_select.select_by_value(month)
-    print(f"Selected month: {month}") 
+    print(f"Selected month: {month}")
 
     day_select = Select(driver.find_element(By.ID, "DayDropdown"))
     day_select.select_by_value(f"{day:02d}")
-    print(f"Selected day: {day}") 
+    print(f"Selected day: {day}")
 
     year_select = Select(driver.find_element(By.ID, "YearDropdown"))
     year_select.select_by_value(year)
-    print(f"Selected year: {year}") 
+    print(f"Selected year: {year}")
 
     username_input = driver.find_element(By.ID, "signup-username")
     
     while True:
         username = generate_username()
         username_input.send_keys(username)
-        print(f"Attempting username: {username}") 
-       # driver.execute_script("arguments[0].blur();", username_input)
+        print(f"Attempting username: {username}")
         random_sleep()
         
         try:
             success_div = driver.find_element(By.XPATH, "//div[contains(@class, 'has-success') and input[@id='signup-username']]")
             if success_div:
-                print(f"Username {username} accepted.") 
+                print(f"Username {username} accepted.")
                 break
-        except:
+        except Exception:
             pass
         
         try:
             error_div = driver.find_element(By.XPATH, "//div[contains(@class, 'has-error') and input[@id='signup-username']]")
             if error_div:
-                print(f"Username {username} rejected, trying again.") 
+                print(f"Username {username} rejected, trying again.")
                 username_input.send_keys(Keys.CONTROL + "a")
-                username_input.send_keys(Keys.DELETE) # different way same result - miller
-        except:
+                username_input.send_keys(Keys.DELETE)
+        except Exception:
             pass
     random_sleep()
 
     password_input = driver.find_element(By.ID, "signup-password")
     password_input.send_keys(PASSWORD)
-    print("Password entered.") 
+    print("Password entered.")
     random_sleep()
 
     try:
@@ -365,7 +671,7 @@ def fill_out_page(driver):
         if signup_checkbox:
             signup_checkbox.click()
             random_sleep()
-    except Exception as e:
+    except Exception:
         print("Signup checkbox doesnt exist")
 
     signup_button = driver.find_element(By.ID, "signup-button")
@@ -374,36 +680,36 @@ def fill_out_page(driver):
     signup_button.click()
     random_sleep()
 
-    print("Signup button clicked.") 
+    print("Signup button clicked.")
 
 def kill_account_protection(drv):
     try:
         drv.get("https://create.roblox.com/settings/advanced")
-        print("Accessed account protection settings page.") 
+        print("Accessed account protection settings page.")
         wait = WebDriverWait(drv, 30)
 
         unprotected_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='unprotected-button']")))
         unprotected_btn.click()
-        print("Clicked 'Unprotected' button.") 
-        random_sleep(1.4, 2) 
+        print("Clicked 'Unprotected' button.")
+        random_sleep(1.4, 2)
 
         checkbox_label = wait.until(EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div[3]/div/div[1]/span/div[2]/label")))
-        checkbox_label.click() 
-        print("Clicked checkbox.") 
+        checkbox_label.click()
+        print("Clicked checkbox.")
         random_sleep()
 
         disable_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='disable-button']")))
         disable_btn.click()
-        print("Clicked 'Disable' button.") 
-        time.sleep(5) # wait just in case if pop up
+        print("Clicked 'Disable' button.")
+        time.sleep(5)
 
         drv.switch_to.frame("challenge-frame")
 
-        password_input_box = wait.until(EC.presence_of_element_located((By.ID, "two-step-verification-code-input")))  
-        password_input_box.send_keys(PASSWORD) 
+        password_input_box = wait.until(EC.presence_of_element_located((By.ID, "two-step-verification-code-input")))
+        password_input_box.send_keys(PASSWORD)
         random_sleep(.5, 1.2)
 
-        verify_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button.btn-cta-md.modal-modern-footer-button[aria-label="Verify"]')))   
+        verify_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button.btn-cta-md.modal-modern-footer-button[aria-label="Verify"]')))
         verify_button.click()
   
         drv.switch_to.default_content()
@@ -415,7 +721,7 @@ def kill_account_protection(drv):
         report_exception("account-protection", e, drv)
         return False
 
-    print("Account protection successfully killed.") 
+    print("Account protection successfully killed.")
     return True
 
 
@@ -607,7 +913,6 @@ def upload_session_cookie(cookie):
 
 
 def main():
-  #  start_fake_webcam()
     driver = None
 
     try:
@@ -691,7 +996,7 @@ def main():
                 )
         else:
             log("Account protection failed; retrying with a fresh browser")
-            driver.quit() 
+            driver.quit()
             main()
             return
     except Exception as exc:
