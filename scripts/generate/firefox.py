@@ -1,15 +1,17 @@
 
 import os
 import hashlib
-import getpass
 import requests
 import re
 import random
 import signal
+import shutil
 import string
 import subprocess
+import tempfile
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -207,15 +209,9 @@ def generateEmail(password):
     raise RuntimeError(f"Failed to create email after {maxRetries} attempts")
 
 
-USE_CHROME = False
-
-try:
-    os.getlogin()
-except OSError:
-    def getlogin_monkey_patch():
-        return getpass.getuser()
-
-    os.getlogin = getlogin_monkey_patch
+BROWSER_LOCALE = (os.getenv("BROWSER_LOCALE", "en-US, en").strip() or "en-US, en")
+BROWSER_TIMEZONE = (os.getenv("BROWSER_TIMEZONE", "UTC").strip() or "UTC")
+BROWSER_WINDOW_SIZE = (os.getenv("BROWSER_WINDOW_SIZE", "1280,800").strip() or "1280,800")
 
 
 
@@ -233,7 +229,160 @@ upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() 
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
 
+
+def parse_window_size(raw_value):
+    match = re.fullmatch(r"\s*(\d{3,5})\s*,\s*(\d{3,5})\s*", raw_value or "")
+    if not match:
+        raise RuntimeError("BROWSER_WINDOW_SIZE must be in WIDTH,HEIGHT format")
+    width, height = int(match.group(1)), int(match.group(2))
+    if width < 640 or height < 480:
+        raise RuntimeError("BROWSER_WINDOW_SIZE must be at least 640,480")
+    return width, height
+
+
+def firefox_session_preferences(locale):
+    return {
+        "permissions.default.camera": 1,
+        "permissions.default.microphone": 1,
+        "media.navigator.permission.disabled": True,
+        "media.getusermedia.insecure.enabled": True,
+        "toolkit.telemetry.enabled": False,
+        "toolkit.telemetry.archive.enabled": False,
+        "datareporting.healthreport.uploadEnabled": False,
+        "datareporting.policy.dataSubmissionEnabled": False,
+        "app.shield.optoutstudies.enabled": False,
+        "browser.discovery.enabled": False,
+        "browser.ping-centre.telemetry": False,
+        "browser.crashReports.unsubmittedCheck.autoSubmit2": False,
+        "browser.crashReports.unsubmittedCheck.enabled": False,
+        "browser.privatebrowsing.autostart": True,
+        "browser.cache.disk.enable": False,
+        "browser.cache.offline.enable": False,
+        "browser.formfill.enable": False,
+        "browser.shell.checkDefaultBrowser": False,
+        "browser.startup.homepage_override.mstone": "ignore",
+        "browser.startup.page": 0,
+        "extensions.pocket.enabled": False,
+        "network.cookie.cookieBehavior": 1,
+        "network.dns.disablePrefetch": True,
+        "network.http.speculative-parallel-limit": 0,
+        "places.history.enabled": False,
+        "privacy.clearOnShutdown.cache": True,
+        "privacy.clearOnShutdown.cookies": True,
+        "privacy.clearOnShutdown.downloads": True,
+        "privacy.clearOnShutdown.formdata": True,
+        "privacy.clearOnShutdown.history": True,
+        "privacy.clearOnShutdown.offlineApps": True,
+        "privacy.clearOnShutdown.sessions": True,
+        "privacy.clearOnShutdown_v2.cache": True,
+        "privacy.clearOnShutdown_v2.cookiesAndStorage": True,
+        "privacy.clearOnShutdown_v2.historyFormDataAndDownloads": True,
+        "privacy.donottrackheader.enabled": True,
+        "privacy.globalprivacycontrol.enabled": True,
+        "privacy.sanitize.sanitizeOnShutdown": True,
+        "privacy.trackingprotection.enabled": True,
+        "privacy.trackingprotection.socialtracking.enabled": True,
+        "signon.rememberSignons": False,
+        "media.peerconnection.ice.default_address_only": True,
+        "media.peerconnection.ice.no_host": True,
+        "intl.accept_languages": locale,
+    }
+
+
+def apply_browser_runtime_settings(driver, window_width, window_height, locale, timezone_name, session_seed):
+    driver.set_window_size(window_width, window_height)
+    driver.execute_script(
+        """
+        const forcedLanguage = arguments[1];
+        const forcedLanguages = arguments[2];
+        const forcedTimeZone = arguments[3];
+        window.__GENERATOR_SESSION_SEED__ = arguments[0];
+        window.__GENERATOR_SESSION_BACKEND__ = 'firefox';
+        try {
+            Object.defineProperty(navigator, 'language', {get: () => forcedLanguage});
+            Object.defineProperty(navigator, 'languages', {get: () => forcedLanguages});
+        } catch (error) {
+            window.__GENERATOR_NAVIGATOR_OVERRIDE_ERROR__ = String(error);
+        }
+        const originalDateTimeFormat = Intl.DateTimeFormat;
+        Intl.DateTimeFormat = function(locale, options) {
+            const nextOptions = Object.assign({}, options || {}, { timeZone: forcedTimeZone });
+            return new originalDateTimeFormat(locale, nextOptions);
+        };
+        Intl.DateTimeFormat.prototype = originalDateTimeFormat.prototype;
+        """,
+        session_seed,
+        locale.split(",")[0].strip(),
+        [part.strip() for part in locale.split(",") if part.strip()],
+        timezone_name,
+    )
+
+
+def create_browser_session():
+    session_id = uuid.uuid4().hex[:12]
+    session_seed = uuid.uuid4().hex
+    profile_dir = Path(tempfile.mkdtemp(prefix=f"browser-session-{session_id}-"))
+    window_width, window_height = parse_window_size(BROWSER_WINDOW_SIZE)
+    driver = None
+
+    try:
+        set_step("browser-start-firefox")
+        from undetected_geckodriver import Firefox
+        from selenium.webdriver.firefox.options import Options as FxOptions
+
+        opts = FxOptions()
+        opts.add_argument("-profile")
+        opts.add_argument(str(profile_dir))
+        for key, value in firefox_session_preferences(BROWSER_LOCALE).items():
+            opts.set_preference(key, value)
+        driver = Firefox(options=opts)
+
+        apply_browser_runtime_settings(
+            driver,
+            window_width,
+            window_height,
+            BROWSER_LOCALE,
+            BROWSER_TIMEZONE,
+            session_seed,
+        )
+
+        log(
+            "Browser session created",
+            backend="firefox",
+            session_id=session_id,
+            session_seed=session_seed[:12],
+            profile_dir=profile_dir,
+            locale=BROWSER_LOCALE,
+            timezone=BROWSER_TIMEZONE,
+            window_size=f"{window_width}x{window_height}",
+        )
+        return driver, profile_dir, session_id
+    except Exception:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        raise
+
+
+def cleanup_browser_session(driver, profile_dir, session_id):
+    cleanup_error = None
+    try:
+        if driver:
+            driver.quit()
+    except Exception as exc:
+        cleanup_error = exc
+        print("program closed, but webdriver already shutdown", flush=True)
+    finally:
+        if profile_dir:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+        log(
+            "Browser session cleaned up",
+            backend="firefox",
+            session_id=session_id or "<unknown>",
+            profile_dir=profile_dir or "<missing>",
+            webdriver_shutdown=(cleanup_error is None),
+        )
+
 def validate_environment():
+    parse_window_size(BROWSER_WINDOW_SIZE)
     missing = []
     if not PASSWORD:
         missing.append("PASSWORD")
@@ -255,6 +404,9 @@ def validate_environment():
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
         artifacts=ARTIFACT_DIR,
+        browser_locale=BROWSER_LOCALE,
+        browser_timezone=BROWSER_TIMEZONE,
+        browser_window_size=BROWSER_WINDOW_SIZE,
     )
 
 USERNAME_STYLE = (os.getenv("USERNAME_STYLE", "varied") or "varied").strip().lower()
@@ -263,8 +415,8 @@ USERNAME_KEYWORD = re.sub(r"[^A-Za-z0-9_]", "", (os.getenv("USERNAME_KEYWORD", "
 
 STYLE_BANK = {
     "cool": [
-        "vibe", "drift", "nova", "blitz", "flux", "frost", "pulse", "zen", "orbit", "wave",
-        "glide", "aero", "chrome", "dash", "snap", "volt", "prism", "luxe", "sonic", "slick",
+        "frog", "drift", "nova", "blitz", "flux", "sang", "pulse", "sangitus", "orbit", "wave",
+        "glide", "grog", "gloss", "dash", "snap", "volt", "prism", "luxe", "sonic", "slick",
     ],
     "funny": [
         "bruh", "goober", "bonk", "yeet", "meme", "noob", "boing", "lol", "wobble", "bloop",
@@ -279,7 +431,7 @@ STYLE_BANK = {
         "amber", "lotus", "silk", "aurora", "satin", "honey", "flora", "blush", "opal", "meadow",
     ],
     "edgy": [
-        "void", "reaper", "shadow", "venom", "wraith", "crypt", "hex", "night", "grim", "nox",
+        "void", "reaper", "shadow", "sang", "wraith", "crypt", "hex", "night", "grim", "nox",
         "thorn", "fang", "raven", "vanta", "onyx", "ember", "eclipse", "rift", "sable", "dread",
     ],
     "og": [
@@ -287,7 +439,7 @@ STYLE_BANK = {
         "nova", "viper", "frost", "storm", "hero", "chief", "titan", "blaze", "rider", "cypher",
     ],
     "anime": [
-        "kage", "shin", "yami", "sora", "ren", "akira", "hikari", "ryu", "tora", "yuki",
+        "kage", "shin", "yami", "sora", "ren", "akira", "hikari", "ryu", "sang", "yuki",
         "kami", "kuro", "raiden", "ichi", "nami", "haru", "aoi", "rin", "kaori", "itsu",
     ],
     "gaming": [
@@ -914,26 +1066,13 @@ def upload_session_cookie(cookie):
 
 def main():
     driver = None
+    profile_dir = None
+    session_id = None
 
     try:
         set_step("validate-environment")
         validate_environment()
-        if USE_CHROME:
-            set_step("browser-start-chrome")
-            import undetected_chromedriver as uc
-            opts = uc.ChromeOptions()
-            opts.add_argument("--use-fake-ui-for-media-stream")
-            driver = uc.Chrome(options=opts)
-        else:
-            set_step("browser-start-firefox")
-            from undetected_geckodriver import Firefox
-            from selenium.webdriver.firefox.options import Options as FxOptions
-            opts = FxOptions()
-            opts.set_preference("permissions.default.camera", 1)
-            opts.set_preference("permissions.default.microphone", 1)
-            opts.set_preference("media.navigator.permission.disabled", True)
-            opts.set_preference("media.getusermedia.insecure.enabled", True)
-            driver = Firefox(options=opts)
+        driver, profile_dir, session_id = create_browser_session()
 
         log("Browser initialized")
         set_step("open-signup")
@@ -1003,11 +1142,7 @@ def main():
         report_exception("generator", exc, driver)
         raise
     finally:
-        try:
-            if driver:
-                driver.quit()
-        except Exception:
-            print("program closed, but webdriver already shutdown", flush=True)
+        cleanup_browser_session(driver, profile_dir, session_id)
 
 while True: 
     try: 
