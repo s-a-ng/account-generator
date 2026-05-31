@@ -15,13 +15,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -32,13 +32,16 @@ jobs:
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
           echo "DISPLAY=:99" >> $GITHUB_ENV
-          
+
       - name: Run generator
         env:
           UPLOAD_KEY: ${{ secrets.UPLOAD_KEY }}
           PASSWORD: ${{ secrets.PASSWORD }}
           ROBLOX_SESSION_INGEST_DIVISION: ${{ inputs.ingest_division }}
           ROBLOX_SESSION_INGEST_POOL: ${{ inputs.ingest_pool }}
+          BROWSER_LOCALE: en-US, en
+          BROWSER_TIMEZONE: UTC
+          BROWSER_WINDOW_SIZE: 1280,800
           GENERATOR_ARTIFACT_DIR: artifacts/generator
           PYTHONUNBUFFERED: "1"
         run: |
