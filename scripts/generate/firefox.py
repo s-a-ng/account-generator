@@ -324,50 +324,6 @@ def fill_out_page(driver):
 
     print("Signup button clicked.")
 
-def kill_account_protection(drv):
-    try:
-        drv.get("https://create.roblox.com/settings/advanced")
-        print("Accessed account protection settings page.")
-        wait = WebDriverWait(drv, 30)
-
-        unprotected_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='unprotected-button']")))
-        unprotected_btn.click()
-        print("Clicked 'Unprotected' button.")
-        random_sleep(1.4, 2)
-
-        checkbox_label = wait.until(EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div[3]/div/div[1]/span/div[2]/label")))
-        checkbox_label.click()
-        print("Clicked checkbox.")
-        random_sleep()
-
-        disable_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='disable-button']")))
-        disable_btn.click()
-        print("Clicked 'Disable' button.")
-        time.sleep(5)
-
-        drv.switch_to.frame("challenge-frame")
-
-        password_input_box = wait.until(EC.presence_of_element_located((By.ID, "two-step-verification-code-input")))
-        password_input_box.send_keys(PASSWORD)
-        random_sleep(.5, 1.2)
-
-        verify_button = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button.btn-cta-md.modal-modern-footer-button[aria-label="Verify"]')))
-        verify_button.click()
-  
-        drv.switch_to.default_content()
-
-        time.sleep(3)
-
-
-    except Exception as e:
-        report_exception("account-protection", e, drv)
-        return False
-
-    print("Account protection successfully killed.")
-    return True
-
-
-
 def poll_email(email, emailPassword, emailID):
     print(f"Polling email for {email}...")
     emailCheckAttempts = 0
@@ -588,9 +544,6 @@ def main():
         set_step("wait-signup-result")
         poll_for_captcha(driver)
 
-        set_step("account-protection")
-        success = kill_account_protection(driver)
-
         set_step("email-verification")
         verified = verify_email_address(driver)
 
@@ -599,48 +552,40 @@ def main():
         else:
             print("Email verification failed.", flush=True)
 
-        age_verified = False # age_verify(driver)
+        set_step("session-upload")
+        roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
+        if not upload_key:
+            raise RuntimeError("UPLOAD_KEY is required to upload Roblox sessions")
+        if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
+            raise RuntimeError(".ROBLOSECURITY cookie was not found in the browser session")
 
-        if success:
-            set_step("session-upload")
-            roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
-            if not upload_key:
-                raise RuntimeError("UPLOAD_KEY is required to upload Roblox sessions")
-            if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
-                raise RuntimeError(".ROBLOSECURITY cookie was not found in the browser session")
+        log(
+            "Uploading Roblox session",
+            upload_url=upload_url,
+            ingest_division=upload_division,
+            ingest_pool=upload_pool,
+            cookie=secret_summary(roblosecurity_cookie["value"]),
+        )
 
-            log(
-                "Uploading Roblox session",
-                upload_url=upload_url,
-                ingest_division=upload_division,
-                ingest_pool=upload_pool,
-                cookie=secret_summary(roblosecurity_cookie["value"]),
+        payload = upload_session_cookie(roblosecurity_cookie["value"])
+        session = payload.get("session") or {}
+        if session:
+            print(
+                "Cookie uploaded successfully.",
+                f"session_id={session.get('session_id')}",
+                f"username={session.get('username')}",
+                f"status={session.get('status')}",
+                flush=True,
             )
-            
-            payload = upload_session_cookie(roblosecurity_cookie["value"])
-            session = payload.get("session") or {}
-            if session:
-                print(
-                    "Cookie uploaded successfully.",
-                    f"session_id={session.get('session_id')}",
-                    f"username={session.get('username')}",
-                    f"status={session.get('status')}",
-                    flush=True,
-                )
-            else:
-                job = payload.get("job") or {}
-                print(
-                    "Cookie import queued.",
-                    f"job_id={job.get('id')}",
-                    f"status={job.get('status')}",
-                    f"status_url={job.get('status_url')}",
-                    flush=True,
-                )
         else:
-            log("Account protection failed; retrying with a fresh browser")
-            driver.quit()
-            main()
-            return
+            job = payload.get("job") or {}
+            print(
+                "Cookie import queued.",
+                f"job_id={job.get('id')}",
+                f"status={job.get('status')}",
+                f"status_url={job.get('status_url')}",
+                flush=True,
+            )
     except Exception as exc:
         report_exception("generator", exc, driver)
         raise
@@ -651,8 +596,5 @@ def main():
         except Exception:
             print("program closed, but webdriver already shutdown", flush=True)
 
-while True: 
-    try: 
-        main()
-    except KeyboardInterrupt:
-        exit()
+if __name__ == "__main__":
+    main()
