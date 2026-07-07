@@ -596,5 +596,8 @@ def main():
         except Exception:
             print("program closed, but webdriver already shutdown", flush=True)
 
-if __name__ == "__main__":
-    main()
+while True:
+    try:
+        main()
+    except KeyboardInterrupt:
+        exit()
