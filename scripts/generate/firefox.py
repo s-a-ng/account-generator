@@ -26,6 +26,11 @@ LOOPBACK_DEV = "pio;jk;jk;;2"
 _ffmpeg_proc = None
 ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
 CURRENT_STEP = "startup"
+CREATE_ACCOUNT_URL = "https://www.roblox.com/CreateAccount"
+
+
+class SignupRetry(RuntimeError):
+    pass
 
 def utc_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -434,18 +439,18 @@ def poll_for_captcha(driver, timeout_seconds=120):
         if "https://www.roblox.com/home" in driver.current_url: 
             break
         if time.time() - started > timeout_seconds:
-            raise TimeoutError(f"Timed out waiting for signup completion after {timeout_seconds}s")
+            raise SignupRetry(f"Timed out waiting for signup completion after {timeout_seconds}s")
 
         try:
             driver.find_element(By.CSS_SELECTOR, 'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]')
-            raise RuntimeError("Detected Roblox captcha during signup")
+            raise SignupRetry("Detected Roblox captcha during signup")
         except Exception as exc:
             if isinstance(exc, RuntimeError):
                 raise
 
         try:
             driver.find_element(By.CSS_SELECTOR, 'div#GeneralErrorText[role="button"][aria-label="dismiss general error"]')
-            raise RuntimeError("Detected Roblox general signup error")
+            raise SignupRetry("Detected Roblox general signup error")
         except Exception as exc:
             if isinstance(exc, RuntimeError):
                 raise
@@ -534,15 +539,21 @@ def main():
             driver = Firefox(options=opts)
 
         log("Browser initialized")
-        set_step("open-signup")
-        driver.get("https://www.roblox.com/CreateAccount")
-        log("Accessed Roblox account creation page", url=redacted_url(driver.current_url))
+        while True:
+            set_step("open-signup")
+            driver.get(CREATE_ACCOUNT_URL)
+            log("Accessed Roblox account creation page", url=redacted_url(driver.current_url))
 
-        set_step("fill-signup")
-        fill_out_page(driver)
+            set_step("fill-signup")
+            fill_out_page(driver)
 
-        set_step("wait-signup-result")
-        poll_for_captcha(driver)
+            set_step("wait-signup-result")
+            try:
+                poll_for_captcha(driver)
+                break
+            except SignupRetry as exc:
+                log("Reloading signup page after retryable signup failure", reason=exc)
+                random_sleep(1.5, 3.0)
 
         set_step("email-verification")
         verified = verify_email_address(driver)
