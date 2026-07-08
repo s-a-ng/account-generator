@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -27,6 +28,7 @@ _ffmpeg_proc = None
 ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
 CURRENT_STEP = "startup"
 CREATE_ACCOUNT_URL = "https://www.roblox.com/CreateAccount"
+ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
 
 
 class SignupRetry(RuntimeError):
@@ -80,6 +82,16 @@ def env_float(name, default):
         value = float(raw)
     except ValueError as exc:
         raise RuntimeError(f"{name} must be a number") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than zero")
+    return value
+
+def env_int(name, default):
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
     if value <= 0:
         raise RuntimeError(f"{name} must be greater than zero")
     return value
@@ -238,6 +250,7 @@ upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip()
 upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
+roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
 
 def validate_environment():
     missing = []
@@ -258,6 +271,7 @@ def validate_environment():
         ingest_division=upload_division,
         ingest_pool=upload_pool,
         upload_enqueue_timeout_seconds=upload_enqueue_timeout_seconds,
+        roblox_page_retry_attempts=roblox_page_retry_attempts,
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
         artifacts=ARTIFACT_DIR,
@@ -265,6 +279,17 @@ def validate_environment():
 
 def random_sleep(min = 0.3, max = 0.8):
     time.sleep(random.uniform(min, max))
+
+def is_roblox_request_error_page(driver):
+    try:
+        current_url = driver.current_url or ""
+        page_source = (driver.page_source or "").lower()
+    except Exception:
+        return False
+    return (
+        "request-error" in current_url
+        or ("something went wrong" in page_source and "unexpected error occurred" in page_source)
+    )
 
 def fill_out_page(driver):
     month, day, year = generate_random_birthdate()
@@ -353,21 +378,44 @@ def poll_email(email, emailPassword, emailID):
 
 def link_email(driver, email):
     print("Linking email...")
-    driver.get("https://www.roblox.com/my/account#!/info")
-    wait = WebDriverWait(driver, 30)
+    last_error = None
+    for attempt in range(1, roblox_page_retry_attempts + 1):
+        driver.get(ACCOUNT_SETTINGS_URL)
+        log(
+            "Opened account settings page",
+            attempt=f"{attempt}/{roblox_page_retry_attempts}",
+            url=redacted_url(driver.current_url),
+        )
+        wait = WebDriverWait(driver, 30)
 
-    btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'settings-text-field-container')][.//span[text()='Email']]//button[contains(@class, 'foundation-web-button') and .//span[normalize-space()='Add']]")))
-    btn.click()
-    print("Clicked Add button.")
-    email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
-    email_input.send_keys(email)
-    print(f"Entered email into modal: {email}")
-    random_sleep()
-    
-    add_email_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='modal-full-width-button btn-primary-md btn-min-width' and text()='Add Email']")))
-    add_email_btn.click()
-    print("Clicked Add Email button")
-    random_sleep()
+        if is_roblox_request_error_page(driver):
+            log("Roblox account settings returned request error; reloading", attempt=attempt)
+            random_sleep(1.5, 3.0)
+            continue
+
+        try:
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'settings-text-field-container')][.//span[text()='Email']]//button[contains(@class, 'foundation-web-button') and .//span[normalize-space()='Add']]")))
+            btn.click()
+            print("Clicked Add button.")
+            email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
+            email_input.send_keys(email)
+            print(f"Entered email into modal: {email}")
+            random_sleep()
+
+            add_email_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='modal-full-width-button btn-primary-md btn-min-width' and text()='Add Email']")))
+            add_email_btn.click()
+            print("Clicked Add Email button")
+            random_sleep()
+            return
+        except TimeoutException as exc:
+            last_error = exc
+            if is_roblox_request_error_page(driver):
+                log("Roblox account settings became request error; reloading", attempt=attempt)
+                random_sleep(1.5, 3.0)
+                continue
+            raise
+
+    raise RuntimeError(f"Failed to load Roblox account settings after {roblox_page_retry_attempts} attempts") from last_error
 
 
 def verify_email_address(driver):
