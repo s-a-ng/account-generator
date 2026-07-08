@@ -5,19 +5,15 @@ import getpass
 import requests
 import re
 import random
-import select
 import signal
-import socketserver
 import string
 import subprocess
-import threading
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlencode, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
-import socks
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -70,31 +66,6 @@ def secret_summary(value):
         return "<missing>"
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
     return f"<set len={len(value)} sha256={digest}>"
-
-def cookie_shape_summary(value):
-    text = str(value or "")
-    return {
-        "len": len(text),
-        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:10] if text else None,
-        "has_cookie_name": ".ROBLOSECURITY" in text,
-        "has_semicolon": ";" in text,
-        "starts_with_warning": text.startswith("_|WARNING:"),
-    }
-
-def proxy_summary(value):
-    text = str(value or "")
-    if not text:
-        return {"present": False}
-    parsed = urlparse(text)
-    host = parsed.hostname or ""
-    return {
-        "present": True,
-        "scheme": parsed.scheme or None,
-        "host_sha256": hashlib.sha256(host.encode("utf-8")).hexdigest()[:10] if host else None,
-        "port": parsed.port,
-        "has_auth": bool(parsed.username or parsed.password),
-        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:10],
-    }
 
 def redacted_url(url):
     if not url:
@@ -276,13 +247,10 @@ def generate_random_birthdate():
 PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
 upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/internal/roblox-sessions/import")
-upload_proxy_url = os.getenv("UPLOAD_PROXY_URL", "").strip()
 upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip() or "default"
 upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
-upload_import_timeout_seconds = env_float("UPLOAD_IMPORT_TIMEOUT_SECONDS", 90)
-upload_import_poll_seconds = env_float("UPLOAD_IMPORT_POLL_SECONDS", 2)
 roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
 
 def validate_environment():
@@ -301,12 +269,9 @@ def validate_environment():
         "Configuration loaded",
         display=os.getenv("DISPLAY", "<missing>"),
         upload_url=upload_url,
-        upload_proxy_url=upload_proxy_url or "<derived>",
         ingest_division=upload_division,
         ingest_pool=upload_pool,
         upload_enqueue_timeout_seconds=upload_enqueue_timeout_seconds,
-        upload_import_timeout_seconds=upload_import_timeout_seconds,
-        upload_import_poll_seconds=upload_import_poll_seconds,
         roblox_page_retry_attempts=roblox_page_retry_attempts,
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
@@ -558,306 +523,7 @@ def parse_upload_payload(response):
             f"body={response_body_preview(response)}"
         ) from exc
 
-def control_endpoint(path):
-    parsed = urlparse(upload_url)
-    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
-
-def acquire_import_proxy():
-    endpoint = upload_proxy_url or control_endpoint("/api/internal/roblox-sessions/import-proxy")
-    response = requests.post(
-        endpoint,
-        headers={"x-session-ingest-key": upload_key},
-        timeout=upload_enqueue_timeout_seconds,
-    )
-    payload = parse_upload_payload(response)
-    if response.status_code != 200 or not payload.get("proxy"):
-        raise RuntimeError(
-            f"Failed to acquire Roblox session import proxy: status={response.status_code} "
-            f"body={response_body_preview(response)}"
-        )
-
-    proxy = payload["proxy"]
-    log("Acquired Roblox session import proxy", proxy=proxy_summary(proxy))
-    return proxy
-
-def preflight_import_proxy(proxy):
-    proxies = {
-        "http": proxy,
-        "https": proxy,
-    }
-    response = requests.get(
-        CREATE_ACCOUNT_URL,
-        headers={"user-agent": "Mozilla/5.0"},
-        proxies=proxies,
-        timeout=upload_enqueue_timeout_seconds,
-    )
-    log(
-        "Import proxy Roblox preflight",
-        proxy=proxy_summary(proxy),
-        status=response.status_code,
-        url=redacted_url(response.url),
-    )
-    if response.status_code >= 500:
-        raise RuntimeError(f"Import proxy Roblox preflight failed with status {response.status_code}")
-
-def split_host_port(value, default_port):
-    host_port = str(value or "").strip()
-    if host_port.startswith("["):
-        end = host_port.find("]")
-        if end != -1:
-            host = host_port[1:end]
-            rest = host_port[end + 1:]
-            return host, int(rest[1:]) if rest.startswith(":") else default_port
-
-    if ":" in host_port:
-        host, port = host_port.rsplit(":", 1)
-        return host, int(port)
-    return host_port, default_port
-
-def relay_sockets(left, right):
-    sockets = [left, right]
-    for sock in sockets:
-        sock.setblocking(False)
-
-    while True:
-        readable, _, exceptional = select.select(sockets, [], sockets, 60)
-        if exceptional:
-            return
-        if not readable:
-            return
-
-        for sock in readable:
-            other = right if sock is left else left
-            try:
-                data = sock.recv(65536)
-            except OSError:
-                return
-            if not data:
-                return
-            try:
-                other.sendall(data)
-            except OSError:
-                return
-
-def upstream_socket(proxy, target_host, target_port):
-    parsed = urlparse(proxy)
-    scheme = (parsed.scheme or "").lower()
-    if scheme not in ("socks", "socks4", "socks5", "socks5h"):
-        raise RuntimeError(f"Unsupported upstream browser proxy scheme: {scheme}")
-
-    proxy_type = socks.SOCKS4 if scheme == "socks4" else socks.SOCKS5
-    sock = socks.socksocket()
-    sock.set_proxy(
-        proxy_type,
-        parsed.hostname,
-        parsed.port or 1080,
-        rdns=scheme == "socks5h",
-        username=unquote(parsed.username) if parsed.username else None,
-        password=unquote(parsed.password) if parsed.password else None,
-    )
-    sock.settimeout(upload_enqueue_timeout_seconds)
-    sock.connect((target_host, target_port))
-    return sock
-
-class BrowserProxyServer(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-
-class BrowserProxyHandler(socketserver.StreamRequestHandler):
-    def handle(self):
-        upstream_proxy = self.server.upstream_proxy
-        request_line = self.rfile.readline(65536).decode("iso-8859-1", errors="replace")
-        if not request_line:
-            return
-
-        parts = request_line.rstrip("\r\n").split()
-        if len(parts) != 3:
-            return
-        method, target, version = parts
-
-        headers = []
-        while True:
-            line = self.rfile.readline(65536)
-            if not line or line in (b"\r\n", b"\n"):
-                break
-            headers.append(line)
-
-        if method.upper() == "CONNECT":
-            target_host, target_port = split_host_port(target, 443)
-            upstream = upstream_socket(upstream_proxy, target_host, target_port)
-            try:
-                self.wfile.write(f"{version} 200 Connection Established\r\n\r\n".encode("ascii"))
-                relay_sockets(self.connection, upstream)
-            finally:
-                upstream.close()
-            return
-
-        parsed = urlparse(target)
-        if parsed.scheme and parsed.netloc:
-            target_host = parsed.hostname
-            target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            path = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, parsed.fragment))
-        else:
-            host_header = next((line for line in headers if line.lower().startswith(b"host:")), None)
-            if not host_header:
-                return
-            target_host, target_port = split_host_port(host_header.decode("iso-8859-1").split(":", 1)[1], 80)
-            path = target or "/"
-
-        upstream = upstream_socket(upstream_proxy, target_host, target_port)
-        try:
-            upstream.sendall(f"{method} {path} {version}\r\n".encode("iso-8859-1"))
-            for header in headers:
-                if header.lower().startswith(b"proxy-connection:"):
-                    continue
-                upstream.sendall(header)
-            upstream.sendall(b"\r\n")
-            relay_sockets(self.connection, upstream)
-        finally:
-            upstream.close()
-
-def start_browser_proxy(upstream_proxy):
-    server = BrowserProxyServer(("127.0.0.1", 0), BrowserProxyHandler)
-    server.upstream_proxy = upstream_proxy
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    host, port = server.server_address
-    local_proxy = f"http://{host}:{port}"
-    log("Started local browser proxy", upstream=proxy_summary(upstream_proxy), local_port=port)
-    return server, local_proxy
-
-def configure_firefox_proxy(options, proxy):
-    if not proxy:
-        return
-
-    parsed = urlparse(proxy)
-    scheme = (parsed.scheme or "").lower()
-    host = parsed.hostname
-    if not scheme or not host:
-        raise RuntimeError("Import proxy URL is missing a scheme or host")
-
-    port = parsed.port
-    if not port:
-        if scheme in ("http", "https"):
-            port = 443 if scheme == "https" else 80
-        elif scheme in ("socks", "socks4", "socks5", "socks5h"):
-            port = 1080
-        else:
-            raise RuntimeError(f"Unsupported import proxy scheme: {scheme}")
-
-    options.set_preference("network.proxy.type", 1)
-    options.set_preference("network.proxy.no_proxies_on", "")
-
-    if scheme in ("socks", "socks4", "socks5", "socks5h"):
-        options.set_preference("network.proxy.socks", host)
-        options.set_preference("network.proxy.socks_port", port)
-        options.set_preference("network.proxy.socks_version", 4 if scheme == "socks4" else 5)
-        options.set_preference("network.proxy.socks_remote_dns", scheme == "socks5h")
-        if parsed.username:
-            options.set_preference("network.proxy.socks_username", unquote(parsed.username))
-        if parsed.password:
-            options.set_preference("network.proxy.socks_password", unquote(parsed.password))
-        return
-
-    if scheme in ("http", "https"):
-        options.set_preference("network.proxy.http", host)
-        options.set_preference("network.proxy.http_port", port)
-        options.set_preference("network.proxy.ssl", host)
-        options.set_preference("network.proxy.ssl_port", port)
-        return
-
-    raise RuntimeError(f"Unsupported import proxy scheme: {scheme}")
-
-def import_status_url(job):
-    job_id = job.get("id")
-    status_url = job.get("status_url")
-
-    if status_url:
-        parsed = urlparse(status_url)
-        upload_parsed = urlparse(upload_url)
-        if parsed.netloc and upload_parsed.netloc and parsed.netloc == upload_parsed.netloc:
-            return urlunparse((
-                upload_parsed.scheme or parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                parsed.query,
-                parsed.fragment,
-            ))
-        return status_url
-
-    if not job_id:
-        return None
-
-    upload_parsed = urlparse(upload_url)
-    return urlunparse((
-        upload_parsed.scheme,
-        upload_parsed.netloc,
-        "/api/internal/roblox-sessions/import-status",
-        "",
-        urlencode({"job_id": job_id}),
-        "",
-    ))
-
-def poll_upload_import(job):
-    status_url = import_status_url(job)
-    job_id = job.get("id") or "<unknown>"
-    if not status_url:
-        raise RuntimeError("Upload queued but no import status URL or job id was returned")
-
-    headers = {"x-session-ingest-key": upload_key}
-    deadline = time.time() + upload_import_timeout_seconds
-    last_status = None
-
-    while True:
-        response = requests.get(
-            status_url,
-            headers=headers,
-            timeout=upload_enqueue_timeout_seconds,
-        )
-        payload = parse_upload_payload(response)
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"Import status request failed: status={response.status_code} "
-                f"body={response_body_preview(response)}"
-            )
-
-        current_job = payload.get("job") or {}
-        status = current_job.get("status") or "<unknown>"
-        if status != last_status:
-            error = payload.get("error") or current_job.get("error") or {}
-            session = payload.get("session") or current_job.get("session") or {}
-            log(
-                "Roblox session import status",
-                job_id=job_id,
-                status=status,
-                error_code=error.get("code") or None,
-                error_message=error.get("message") or None,
-                session_id=session.get("session_id") or None,
-                username=session.get("username") or None,
-            )
-            last_status = status
-
-        if status == "succeeded":
-            return payload
-
-        if status == "failed":
-            error = payload.get("error") or current_job.get("error") or {}
-            raise RuntimeError(
-                "Roblox session import failed: "
-                f"code={error.get('code') or '<unknown>'} "
-                f"message={error.get('message') or '<missing>'}"
-            )
-
-        if time.time() >= deadline:
-            raise RuntimeError(
-                f"Timed out waiting for Roblox session import job {job_id}; "
-                f"last_status={status}"
-            )
-
-        time.sleep(upload_import_poll_seconds)
-
-def upload_session_cookie(cookie, proxy):
+def upload_session_cookie(cookie):
     headers = {"x-session-ingest-key": upload_key}
     response = requests.post(
         upload_url,
@@ -865,7 +531,6 @@ def upload_session_cookie(cookie, proxy):
             "cookie": cookie,
             "division": upload_division,
             "pool": upload_pool,
-            "proxy": proxy,
         },
         headers=headers,
         timeout=upload_enqueue_timeout_seconds,
@@ -888,7 +553,7 @@ def upload_session_cookie(cookie, proxy):
             status=job.get("status") or "<unknown>",
             status_url=status_url or "<missing>",
         )
-        return poll_upload_import(job)
+        return payload
 
     if 200 <= response.status_code < 300:
         return payload
@@ -901,16 +566,10 @@ def upload_session_cookie(cookie, proxy):
 
 def main():
     driver = None
-    browser_proxy_server = None
 
     try:
         set_step("validate-environment")
         validate_environment()
-        set_step("acquire-import-proxy")
-        import_proxy = acquire_import_proxy()
-        preflight_import_proxy(import_proxy)
-        browser_proxy_server, browser_proxy = start_browser_proxy(import_proxy)
-
         if USE_CHROME:
             set_step("browser-start-chrome")
             import undetected_chromedriver as uc
@@ -926,7 +585,6 @@ def main():
             opts.set_preference("permissions.default.microphone", 1)
             opts.set_preference("media.navigator.permission.disabled", True)
             opts.set_preference("media.getusermedia.insecure.enabled", True)
-            configure_firefox_proxy(opts, browser_proxy)
             driver = Firefox(options=opts)
 
         log("Browser initialized")
@@ -977,11 +635,9 @@ def main():
             ingest_division=upload_division,
             ingest_pool=upload_pool,
             cookie=secret_summary(roblosecurity_cookie["value"]),
-            cookie_shape=cookie_shape_summary(roblosecurity_cookie["value"]),
-            proxy=proxy_summary(import_proxy),
         )
 
-        payload = upload_session_cookie(roblosecurity_cookie["value"], import_proxy)
+        payload = upload_session_cookie(roblosecurity_cookie["value"])
         session = payload.get("session") or {}
         if session:
             print(
@@ -1009,12 +665,9 @@ def main():
                 driver.quit()
         except Exception:
             print("program closed, but webdriver already shutdown", flush=True)
-        try:
-            if browser_proxy_server:
-                browser_proxy_server.shutdown()
-                browser_proxy_server.server_close()
-        except Exception:
-            pass
 
-if __name__ == "__main__":
-    main()
+while True:
+    try:
+        main()
+    except KeyboardInterrupt:
+        exit()
