@@ -5,15 +5,19 @@ import getpass
 import requests
 import re
 import random
+import select
 import signal
+import socketserver
 import string
 import subprocess
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlencode, urlparse, urlunparse
 
+import socks
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -596,6 +600,131 @@ def preflight_import_proxy(proxy):
     if response.status_code >= 500:
         raise RuntimeError(f"Import proxy Roblox preflight failed with status {response.status_code}")
 
+def split_host_port(value, default_port):
+    host_port = str(value or "").strip()
+    if host_port.startswith("["):
+        end = host_port.find("]")
+        if end != -1:
+            host = host_port[1:end]
+            rest = host_port[end + 1:]
+            return host, int(rest[1:]) if rest.startswith(":") else default_port
+
+    if ":" in host_port:
+        host, port = host_port.rsplit(":", 1)
+        return host, int(port)
+    return host_port, default_port
+
+def relay_sockets(left, right):
+    sockets = [left, right]
+    for sock in sockets:
+        sock.setblocking(False)
+
+    while True:
+        readable, _, exceptional = select.select(sockets, [], sockets, 60)
+        if exceptional:
+            return
+        if not readable:
+            return
+
+        for sock in readable:
+            other = right if sock is left else left
+            try:
+                data = sock.recv(65536)
+            except OSError:
+                return
+            if not data:
+                return
+            try:
+                other.sendall(data)
+            except OSError:
+                return
+
+def upstream_socket(proxy, target_host, target_port):
+    parsed = urlparse(proxy)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("socks", "socks4", "socks5", "socks5h"):
+        raise RuntimeError(f"Unsupported upstream browser proxy scheme: {scheme}")
+
+    proxy_type = socks.SOCKS4 if scheme == "socks4" else socks.SOCKS5
+    sock = socks.socksocket()
+    sock.set_proxy(
+        proxy_type,
+        parsed.hostname,
+        parsed.port or 1080,
+        rdns=scheme == "socks5h",
+        username=unquote(parsed.username) if parsed.username else None,
+        password=unquote(parsed.password) if parsed.password else None,
+    )
+    sock.settimeout(upload_enqueue_timeout_seconds)
+    sock.connect((target_host, target_port))
+    return sock
+
+class BrowserProxyServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+class BrowserProxyHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        upstream_proxy = self.server.upstream_proxy
+        request_line = self.rfile.readline(65536).decode("iso-8859-1", errors="replace")
+        if not request_line:
+            return
+
+        parts = request_line.rstrip("\r\n").split()
+        if len(parts) != 3:
+            return
+        method, target, version = parts
+
+        headers = []
+        while True:
+            line = self.rfile.readline(65536)
+            if not line or line in (b"\r\n", b"\n"):
+                break
+            headers.append(line)
+
+        if method.upper() == "CONNECT":
+            target_host, target_port = split_host_port(target, 443)
+            upstream = upstream_socket(upstream_proxy, target_host, target_port)
+            try:
+                self.wfile.write(f"{version} 200 Connection Established\r\n\r\n".encode("ascii"))
+                relay_sockets(self.connection, upstream)
+            finally:
+                upstream.close()
+            return
+
+        parsed = urlparse(target)
+        if parsed.scheme and parsed.netloc:
+            target_host = parsed.hostname
+            target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            path = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, parsed.fragment))
+        else:
+            host_header = next((line for line in headers if line.lower().startswith(b"host:")), None)
+            if not host_header:
+                return
+            target_host, target_port = split_host_port(host_header.decode("iso-8859-1").split(":", 1)[1], 80)
+            path = target or "/"
+
+        upstream = upstream_socket(upstream_proxy, target_host, target_port)
+        try:
+            upstream.sendall(f"{method} {path} {version}\r\n".encode("iso-8859-1"))
+            for header in headers:
+                if header.lower().startswith(b"proxy-connection:"):
+                    continue
+                upstream.sendall(header)
+            upstream.sendall(b"\r\n")
+            relay_sockets(self.connection, upstream)
+        finally:
+            upstream.close()
+
+def start_browser_proxy(upstream_proxy):
+    server = BrowserProxyServer(("127.0.0.1", 0), BrowserProxyHandler)
+    server.upstream_proxy = upstream_proxy
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    local_proxy = f"http://{host}:{port}"
+    log("Started local browser proxy", upstream=proxy_summary(upstream_proxy), local_port=port)
+    return server, local_proxy
+
 def configure_firefox_proxy(options, proxy):
     if not proxy:
         return
@@ -772,6 +901,7 @@ def upload_session_cookie(cookie, proxy):
 
 def main():
     driver = None
+    browser_proxy_server = None
 
     try:
         set_step("validate-environment")
@@ -779,6 +909,7 @@ def main():
         set_step("acquire-import-proxy")
         import_proxy = acquire_import_proxy()
         preflight_import_proxy(import_proxy)
+        browser_proxy_server, browser_proxy = start_browser_proxy(import_proxy)
 
         if USE_CHROME:
             set_step("browser-start-chrome")
@@ -795,7 +926,7 @@ def main():
             opts.set_preference("permissions.default.microphone", 1)
             opts.set_preference("media.navigator.permission.disabled", True)
             opts.set_preference("media.getusermedia.insecure.enabled", True)
-            configure_firefox_proxy(opts, import_proxy)
+            configure_firefox_proxy(opts, browser_proxy)
             driver = Firefox(options=opts)
 
         log("Browser initialized")
@@ -878,6 +1009,12 @@ def main():
                 driver.quit()
         except Exception:
             print("program closed, but webdriver already shutdown", flush=True)
+        try:
+            if browser_proxy_server:
+                browser_proxy_server.shutdown()
+                browser_proxy_server.server_close()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()
