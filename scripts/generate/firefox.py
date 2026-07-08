@@ -29,6 +29,7 @@ ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
 CURRENT_STEP = "startup"
 CREATE_ACCOUNT_URL = "https://www.roblox.com/CreateAccount"
 ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
+MAX_SIGNUP_RELOADS = 5
 
 
 class SignupRetry(RuntimeError):
@@ -587,10 +588,14 @@ def main():
             driver = Firefox(options=opts)
 
         log("Browser initialized")
-        while True:
+        for signup_reload in range(0, MAX_SIGNUP_RELOADS + 1):
             set_step("open-signup")
             driver.get(CREATE_ACCOUNT_URL)
-            log("Accessed Roblox account creation page", url=redacted_url(driver.current_url))
+            log(
+                "Accessed Roblox account creation page",
+                attempt=f"{signup_reload + 1}/{MAX_SIGNUP_RELOADS + 1}",
+                url=redacted_url(driver.current_url),
+            )
 
             set_step("fill-signup")
             fill_out_page(driver)
@@ -600,7 +605,13 @@ def main():
                 poll_for_captcha(driver)
                 break
             except SignupRetry as exc:
-                log("Reloading signup page after retryable signup failure", reason=exc)
+                if signup_reload >= MAX_SIGNUP_RELOADS:
+                    raise RuntimeError(f"Exceeded {MAX_SIGNUP_RELOADS} signup page reloads") from exc
+                log(
+                    "Reloading signup page after retryable signup failure",
+                    reload=f"{signup_reload + 1}/{MAX_SIGNUP_RELOADS}",
+                    reason=exc,
+                )
                 random_sleep(1.5, 3.0)
 
         set_step("email-verification")
