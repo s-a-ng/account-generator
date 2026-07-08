@@ -12,7 +12,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
@@ -66,6 +66,16 @@ def secret_summary(value):
         return "<missing>"
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
     return f"<set len={len(value)} sha256={digest}>"
+
+def cookie_shape_summary(value):
+    text = str(value or "")
+    return {
+        "len": len(text),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:10] if text else None,
+        "has_cookie_name": ".ROBLOSECURITY" in text,
+        "has_semicolon": ";" in text,
+        "starts_with_warning": text.startswith("_|WARNING:"),
+    }
 
 def redacted_url(url):
     if not url:
@@ -251,6 +261,8 @@ upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip()
 upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
+upload_import_timeout_seconds = env_float("UPLOAD_IMPORT_TIMEOUT_SECONDS", 90)
+upload_import_poll_seconds = env_float("UPLOAD_IMPORT_POLL_SECONDS", 2)
 roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
 
 def validate_environment():
@@ -272,6 +284,8 @@ def validate_environment():
         ingest_division=upload_division,
         ingest_pool=upload_pool,
         upload_enqueue_timeout_seconds=upload_enqueue_timeout_seconds,
+        upload_import_timeout_seconds=upload_import_timeout_seconds,
+        upload_import_poll_seconds=upload_import_poll_seconds,
         roblox_page_retry_attempts=roblox_page_retry_attempts,
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
@@ -523,6 +537,96 @@ def parse_upload_payload(response):
             f"body={response_body_preview(response)}"
         ) from exc
 
+def import_status_url(job):
+    job_id = job.get("id")
+    status_url = job.get("status_url")
+
+    if status_url:
+        parsed = urlparse(status_url)
+        upload_parsed = urlparse(upload_url)
+        if parsed.netloc and upload_parsed.netloc and parsed.netloc == upload_parsed.netloc:
+            return urlunparse((
+                upload_parsed.scheme or parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            ))
+        return status_url
+
+    if not job_id:
+        return None
+
+    upload_parsed = urlparse(upload_url)
+    return urlunparse((
+        upload_parsed.scheme,
+        upload_parsed.netloc,
+        "/api/internal/roblox-sessions/import-status",
+        "",
+        urlencode({"job_id": job_id}),
+        "",
+    ))
+
+def poll_upload_import(job):
+    status_url = import_status_url(job)
+    job_id = job.get("id") or "<unknown>"
+    if not status_url:
+        raise RuntimeError("Upload queued but no import status URL or job id was returned")
+
+    headers = {"x-session-ingest-key": upload_key}
+    deadline = time.time() + upload_import_timeout_seconds
+    last_status = None
+
+    while True:
+        response = requests.get(
+            status_url,
+            headers=headers,
+            timeout=upload_enqueue_timeout_seconds,
+        )
+        payload = parse_upload_payload(response)
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Import status request failed: status={response.status_code} "
+                f"body={response_body_preview(response)}"
+            )
+
+        current_job = payload.get("job") or {}
+        status = current_job.get("status") or "<unknown>"
+        if status != last_status:
+            error = payload.get("error") or current_job.get("error") or {}
+            session = payload.get("session") or current_job.get("session") or {}
+            log(
+                "Roblox session import status",
+                job_id=job_id,
+                status=status,
+                error_code=error.get("code") or None,
+                error_message=error.get("message") or None,
+                session_id=session.get("session_id") or None,
+                username=session.get("username") or None,
+            )
+            last_status = status
+
+        if status == "succeeded":
+            return payload
+
+        if status == "failed":
+            error = payload.get("error") or current_job.get("error") or {}
+            raise RuntimeError(
+                "Roblox session import failed: "
+                f"code={error.get('code') or '<unknown>'} "
+                f"message={error.get('message') or '<missing>'}"
+            )
+
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"Timed out waiting for Roblox session import job {job_id}; "
+                f"last_status={status}"
+            )
+
+        time.sleep(upload_import_poll_seconds)
+
 def upload_session_cookie(cookie):
     headers = {"x-session-ingest-key": upload_key}
     response = requests.post(
@@ -553,7 +657,7 @@ def upload_session_cookie(cookie):
             status=job.get("status") or "<unknown>",
             status_url=status_url or "<missing>",
         )
-        return payload
+        return poll_upload_import(job)
 
     if 200 <= response.status_code < 300:
         return payload
@@ -635,6 +739,7 @@ def main():
             ingest_division=upload_division,
             ingest_pool=upload_pool,
             cookie=secret_summary(roblosecurity_cookie["value"]),
+            cookie_shape=cookie_shape_summary(roblosecurity_cookie["value"]),
         )
 
         payload = upload_session_cookie(roblosecurity_cookie["value"])
@@ -666,8 +771,5 @@ def main():
         except Exception:
             print("program closed, but webdriver already shutdown", flush=True)
 
-while True:
-    try:
-        main()
-    except KeyboardInterrupt:
-        exit()
+if __name__ == "__main__":
+    main()
