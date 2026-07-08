@@ -622,7 +622,7 @@ def configure_firefox_proxy(options, proxy):
         options.set_preference("network.proxy.socks", host)
         options.set_preference("network.proxy.socks_port", port)
         options.set_preference("network.proxy.socks_version", 4 if scheme == "socks4" else 5)
-        options.set_preference("network.proxy.socks_remote_dns", True)
+        options.set_preference("network.proxy.socks_remote_dns", scheme == "socks5h")
         if parsed.username:
             options.set_preference("network.proxy.socks_username", unquote(parsed.username))
         if parsed.password:
