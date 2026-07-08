@@ -21,6 +21,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from pymailtm import Account
 from username_generator import generate_username
+from session_context import seed_hba_keypair
 
 VIDEO_PATH = "9089uilbo0890"
 LOOPBACK_DEV = "pio;jk;jk;;2"
@@ -33,6 +34,9 @@ MAX_SIGNUP_RELOADS = 5
 
 
 class SignupRetry(RuntimeError):
+    pass
+
+class CaptchaDetected(RuntimeError):
     pass
 
 def utc_timestamp():
@@ -226,8 +230,6 @@ def generateEmail(password):
     raise RuntimeError(f"Failed to create email after {maxRetries} attempts")
 
 
-USE_CHROME = False
-
 try:
     os.getlogin()
 except OSError:
@@ -252,6 +254,8 @@ upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() 
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
 roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
+
+hba_material = None
 
 def validate_environment():
     missing = []
@@ -492,7 +496,7 @@ def poll_for_captcha(driver, timeout_seconds=120):
 
         try:
             driver.find_element(By.CSS_SELECTOR, 'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]')
-            raise SignupRetry("Detected Roblox captcha during signup")
+            raise CaptchaDetected("Detected Roblox captcha during signup")
         except Exception as exc:
             if isinstance(exc, RuntimeError):
                 raise
@@ -524,14 +528,20 @@ def parse_upload_payload(response):
         ) from exc
 
 def upload_session_cookie(cookie):
+    if not hba_material:
+        raise RuntimeError("HBA material is required before uploading Roblox sessions")
+
     headers = {"x-session-ingest-key": upload_key}
+    payload = {
+        "cookie": cookie,
+        "division": upload_division,
+        "pool": upload_pool,
+    }
+    payload.update(hba_material.upload_payload())
+
     response = requests.post(
         upload_url,
-        json={
-            "cookie": cookie,
-            "division": upload_division,
-            "pool": upload_pool,
-        },
+        json=payload,
         headers=headers,
         timeout=upload_enqueue_timeout_seconds,
     )
@@ -563,29 +573,23 @@ def upload_session_cookie(cookie):
         f"body={response_body_preview(response)}"
     )
 
-
 def main():
+    global hba_material
     driver = None
+    hba_material = None
 
     try:
         set_step("validate-environment")
         validate_environment()
-        if USE_CHROME:
-            set_step("browser-start-chrome")
-            import undetected_chromedriver as uc
-            opts = uc.ChromeOptions()
-            opts.add_argument("--use-fake-ui-for-media-stream")
-            driver = uc.Chrome(options=opts)
-        else:
-            set_step("browser-start-firefox")
-            from undetected_geckodriver import Firefox
-            from selenium.webdriver.firefox.options import Options as FxOptions
-            opts = FxOptions()
-            opts.set_preference("permissions.default.camera", 1)
-            opts.set_preference("permissions.default.microphone", 1)
-            opts.set_preference("media.navigator.permission.disabled", True)
-            opts.set_preference("media.getusermedia.insecure.enabled", True)
-            driver = Firefox(options=opts)
+        set_step("browser-start-firefox")
+        from undetected_geckodriver import Firefox
+        from selenium.webdriver.firefox.options import Options as FxOptions
+        opts = FxOptions()
+        opts.set_preference("permissions.default.camera", 1)
+        opts.set_preference("permissions.default.microphone", 1)
+        opts.set_preference("media.navigator.permission.disabled", True)
+        opts.set_preference("media.getusermedia.insecure.enabled", True)
+        driver = Firefox(options=opts)
 
         log("Browser initialized")
         for signup_reload in range(0, MAX_SIGNUP_RELOADS + 1):
@@ -595,6 +599,17 @@ def main():
                 "Accessed Roblox account creation page",
                 attempt=f"{signup_reload + 1}/{MAX_SIGNUP_RELOADS + 1}",
                 url=redacted_url(driver.current_url),
+            )
+
+            if hba_material is None:
+                set_step("seed-hba")
+                hba_material = seed_hba_keypair(driver)
+                log(
+                    "Seeded browser HBA key",
+                    public_key=secret_summary(hba_material.public_key_spki),
+                    indexed_db=hba_material.db_name,
+                    object_store=hba_material.object_store_name,
+                    key=hba_material.key_name,
             )
 
             set_step("fill-signup")
@@ -616,25 +631,24 @@ def main():
 
         set_step("email-verification")
         verified = verify_email_address(driver)
-
         if verified:
             print("Email verified.", flush=True)
         else:
             print("Email verification failed.", flush=True)
 
-        set_step("session-upload")
+        set_step("session-capture")
         roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
-        if not upload_key:
-            raise RuntimeError("UPLOAD_KEY is required to upload Roblox sessions")
         if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
             raise RuntimeError(".ROBLOSECURITY cookie was not found in the browser session")
 
+        set_step("session-upload")
         log(
             "Uploading Roblox session",
             upload_url=upload_url,
             ingest_division=upload_division,
             ingest_pool=upload_pool,
             cookie=secret_summary(roblosecurity_cookie["value"]),
+            hba_material=bool(hba_material),
         )
 
         payload = upload_session_cookie(roblosecurity_cookie["value"])
@@ -656,18 +670,30 @@ def main():
                 f"status_url={job.get('status_url')}",
                 flush=True,
             )
+        return True
     except Exception as exc:
         report_exception("generator", exc, driver)
         raise
     finally:
         try:
-            if driver:
+            if driver is not None:
                 driver.quit()
         except Exception:
             print("program closed, but webdriver already shutdown", flush=True)
 
-while True:
-    try:
-        main()
-    except KeyboardInterrupt:
-        exit()
+def run_loop():
+    successes = 0
+    while True:
+        try:
+            if main():
+                successes += 1
+        except KeyboardInterrupt:
+            exit()
+        except CaptchaDetected as exc:
+            log("Stopping generator after captcha", successes=successes, error=exc)
+            return
+        except Exception:
+            continue
+
+if __name__ == "__main__":
+    run_loop()
