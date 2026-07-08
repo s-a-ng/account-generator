@@ -576,6 +576,26 @@ def acquire_import_proxy():
     log("Acquired Roblox session import proxy", proxy=proxy_summary(proxy))
     return proxy
 
+def preflight_import_proxy(proxy):
+    proxies = {
+        "http": proxy,
+        "https": proxy,
+    }
+    response = requests.get(
+        CREATE_ACCOUNT_URL,
+        headers={"user-agent": "Mozilla/5.0"},
+        proxies=proxies,
+        timeout=upload_enqueue_timeout_seconds,
+    )
+    log(
+        "Import proxy Roblox preflight",
+        proxy=proxy_summary(proxy),
+        status=response.status_code,
+        url=redacted_url(response.url),
+    )
+    if response.status_code >= 500:
+        raise RuntimeError(f"Import proxy Roblox preflight failed with status {response.status_code}")
+
 def configure_firefox_proxy(options, proxy):
     if not proxy:
         return
@@ -758,6 +778,7 @@ def main():
         validate_environment()
         set_step("acquire-import-proxy")
         import_proxy = acquire_import_proxy()
+        preflight_import_proxy(import_proxy)
 
         if USE_CHROME:
             set_step("browser-start-chrome")
