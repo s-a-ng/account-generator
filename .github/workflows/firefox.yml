@@ -40,6 +40,7 @@ jobs:
           ROBLOX_SESSION_INGEST_DIVISION: ${{ inputs.ingest_division }}
           ROBLOX_SESSION_INGEST_POOL: ${{ inputs.ingest_pool }}
           GENERATOR_ARTIFACT_DIR: artifacts/generator
+          GENERATOR_RETRY_ATTEMPTS: "5"
           PYTHONUNBUFFERED: "1"
         run: |
           echo $UID > /proc/self/loginuid

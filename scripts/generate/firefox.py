@@ -254,6 +254,7 @@ upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() 
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
 roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
+generator_retry_attempts = env_int("GENERATOR_RETRY_ATTEMPTS", 5)
 
 hba_material = None
 
@@ -277,6 +278,7 @@ def validate_environment():
         ingest_pool=upload_pool,
         upload_enqueue_timeout_seconds=upload_enqueue_timeout_seconds,
         roblox_page_retry_attempts=roblox_page_retry_attempts,
+        generator_retry_attempts=generator_retry_attempts,
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
         artifacts=ARTIFACT_DIR,
@@ -683,17 +685,34 @@ def main():
 
 def run_loop():
     successes = 0
+    failures = 0
     while True:
         try:
             if main():
                 successes += 1
+                failures = 0
         except KeyboardInterrupt:
             exit()
         except CaptchaDetected as exc:
             log("Stopping generator after captcha", successes=successes, error=exc)
             return
-        except Exception:
-            continue
+        except Exception as exc:
+            failures += 1
+            if failures > generator_retry_attempts:
+                log(
+                    "Stopping generator after retry limit",
+                    successes=successes,
+                    failures=failures,
+                    retries=generator_retry_attempts,
+                    error=exc,
+                )
+                raise RuntimeError(f"Exceeded {generator_retry_attempts} generator retries") from exc
+            log(
+                "Retrying generator after failure",
+                successes=successes,
+                retry=f"{failures}/{generator_retry_attempts}",
+                error=exc,
+            )
 
 if __name__ == "__main__":
     run_loop()
