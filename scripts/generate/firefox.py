@@ -39,6 +39,9 @@ class SignupRetry(RuntimeError):
 class CaptchaDetected(RuntimeError):
     pass
 
+class SessionImportFailed(RuntimeError):
+    pass
+
 def utc_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -961,7 +964,10 @@ def main():
             proxy=proxy_summary(import_proxy),
         )
 
-        payload = upload_session_cookie(roblosecurity_cookie["value"], import_proxy)
+        try:
+            payload = upload_session_cookie(roblosecurity_cookie["value"], import_proxy)
+        except Exception as exc:
+            raise SessionImportFailed(str(exc)) from exc
         session = payload.get("session") or {}
         if session:
             print(
@@ -1020,6 +1026,13 @@ def run_loop(generate=None, max_successes=None):
         except CaptchaDetected as exc:
             log("Stopping generator after captcha", successes=successes, error=exc)
             return successes
+        except SessionImportFailed as exc:
+            log(
+                "Stopping generator after session import failure",
+                successes=successes,
+                error=exc,
+            )
+            raise
         except Exception as exc:
             failures += 1
             if failures > generator_retry_attempts:

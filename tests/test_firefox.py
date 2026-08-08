@@ -56,6 +56,20 @@ class GeneratorLoopTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Exceeded 2 generator retries"):
                 firefox.run_loop(generate=generate, max_successes=0)
 
+    def test_import_failure_does_not_create_another_account(self):
+        calls = 0
+
+        def generate():
+            nonlocal calls
+            calls += 1
+            raise firefox.SessionImportFailed("rejected")
+
+        with patch.object(firefox, "log"):
+            with self.assertRaisesRegex(firefox.SessionImportFailed, "rejected"):
+                firefox.run_loop(generate=generate, max_successes=0)
+
+        self.assertEqual(calls, 1)
+
 
 class ImportStatusUrlTests(unittest.TestCase):
     def test_same_host_status_url_uses_the_configured_https_scheme(self):
