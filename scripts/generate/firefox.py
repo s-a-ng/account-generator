@@ -576,6 +576,7 @@ def poll_upload_import(job):
                 status=status,
                 error_code=error.get("code") or None,
                 error_message=error.get("message") or None,
+                error_details=error.get("details") or None,
                 session_id=session.get("session_id") or None,
                 username=session.get("username") or None,
             )
