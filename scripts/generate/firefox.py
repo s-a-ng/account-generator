@@ -10,7 +10,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
@@ -95,6 +95,16 @@ def env_int(name, default):
         raise RuntimeError(f"{name} must be an integer") from exc
     if value <= 0:
         raise RuntimeError(f"{name} must be greater than zero")
+    return value
+
+def env_nonnegative_int(name, default):
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if value < 0:
+        raise RuntimeError(f"{name} must be zero or greater")
     return value
 
 def env_bool(name, default):
@@ -234,8 +244,11 @@ upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip()
 upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
+upload_import_timeout_seconds = env_float("UPLOAD_IMPORT_TIMEOUT_SECONDS", 90)
+upload_import_poll_seconds = env_float("UPLOAD_IMPORT_POLL_SECONDS", 2)
 roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
 generator_retry_attempts = env_int("GENERATOR_RETRY_ATTEMPTS", 5)
+generator_max_successes = env_nonnegative_int("GENERATOR_MAX_SUCCESSES", 0)
 age_verification_enabled = env_bool("AGE_VERIFICATION_ENABLED", True)
 
 hba_material = None
@@ -263,8 +276,11 @@ def validate_environment():
         ingest_division=upload_division,
         ingest_pool=upload_pool,
         upload_enqueue_timeout_seconds=upload_enqueue_timeout_seconds,
+        upload_import_timeout_seconds=upload_import_timeout_seconds,
+        upload_import_poll_seconds=upload_import_poll_seconds,
         roblox_page_retry_attempts=roblox_page_retry_attempts,
         generator_retry_attempts=generator_retry_attempts,
+        generator_max_successes=generator_max_successes or "until-captcha",
         age_verification_enabled=age_verification_enabled,
         fake_cam_video=(
             age_verification_config.video_path
@@ -494,6 +510,96 @@ def parse_upload_payload(response):
             f"body={response_body_preview(response)}"
         ) from exc
 
+def import_status_url(job):
+    job_id = job.get("id")
+    status_url = job.get("status_url")
+
+    if status_url:
+        parsed = urlparse(status_url)
+        upload_parsed = urlparse(upload_url)
+        if parsed.netloc and upload_parsed.netloc and parsed.netloc == upload_parsed.netloc:
+            return urlunparse((
+                upload_parsed.scheme or parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            ))
+        return status_url
+
+    if not job_id:
+        return None
+
+    upload_parsed = urlparse(upload_url)
+    return urlunparse((
+        upload_parsed.scheme,
+        upload_parsed.netloc,
+        "/api/internal/roblox-sessions/import-status",
+        "",
+        urlencode({"job_id": job_id}),
+        "",
+    ))
+
+def poll_upload_import(job):
+    status_url = import_status_url(job)
+    job_id = job.get("id") or "<unknown>"
+    if not status_url:
+        raise RuntimeError("Upload queued but no import status URL or job id was returned")
+
+    headers = {"x-session-ingest-key": upload_key}
+    deadline = time.time() + upload_import_timeout_seconds
+    last_status = None
+
+    while True:
+        response = requests.get(
+            status_url,
+            headers=headers,
+            timeout=upload_enqueue_timeout_seconds,
+        )
+        payload = parse_upload_payload(response)
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Import status request failed: status={response.status_code} "
+                f"body={response_body_preview(response)}"
+            )
+
+        current_job = payload.get("job") or {}
+        status = current_job.get("status") or "<unknown>"
+        if status != last_status:
+            error = payload.get("error") or current_job.get("error") or {}
+            session = payload.get("session") or current_job.get("session") or {}
+            log(
+                "Roblox session import status",
+                job_id=job_id,
+                status=status,
+                error_code=error.get("code") or None,
+                error_message=error.get("message") or None,
+                session_id=session.get("session_id") or None,
+                username=session.get("username") or None,
+            )
+            last_status = status
+
+        if status == "succeeded":
+            return payload
+
+        if status == "failed":
+            error = payload.get("error") or current_job.get("error") or {}
+            raise RuntimeError(
+                "Roblox session import failed: "
+                f"code={error.get('code') or '<unknown>'} "
+                f"message={error.get('message') or '<missing>'}"
+            )
+
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"Timed out waiting for Roblox session import job {job_id}; "
+                f"last_status={status}"
+            )
+
+        time.sleep(upload_import_poll_seconds)
+
 def upload_session_cookie(cookie):
     if not hba_material:
         raise RuntimeError("HBA material is required before uploading Roblox sessions")
@@ -522,15 +628,17 @@ def upload_session_cookie(cookie):
 
     payload = parse_upload_payload(response)
     if response.status_code == 202:
-        job = payload.get("job") or {}
+        job = dict(payload.get("job") or {})
         status_url = job.get("status_url") or response.headers.get("location")
+        if status_url:
+            job["status_url"] = status_url
         log(
             "Roblox session import queued",
             job_id=job.get("id") or "<unknown>",
             status=job.get("status") or "<unknown>",
             status_url=status_url or "<missing>",
         )
-        return payload
+        return poll_upload_import(job)
 
     if 200 <= response.status_code < 300:
         return payload
@@ -675,6 +783,10 @@ def main():
                 flush=True,
             )
         return True
+    except CaptchaDetected:
+        log("Captcha detected", step=CURRENT_STEP)
+        save_browser_artifacts(driver, f"captcha-{CURRENT_STEP}")
+        raise
     except Exception as exc:
         report_exception("generator", exc, driver)
         raise
@@ -685,19 +797,25 @@ def main():
         except Exception:
             print("program closed, but webdriver already shutdown", flush=True)
 
-def run_loop():
+def run_loop(generate=None, max_successes=None):
+    generate = generate or main
+    max_successes = generator_max_successes if max_successes is None else max_successes
     successes = 0
     failures = 0
     while True:
         try:
-            if main():
+            if generate():
                 successes += 1
                 failures = 0
+                if max_successes and successes >= max_successes:
+                    log("Stopping generator after success limit", successes=successes)
+                    return successes
         except KeyboardInterrupt:
-            exit()
+            log("Stopping generator after interrupt", successes=successes)
+            return successes
         except CaptchaDetected as exc:
             log("Stopping generator after captcha", successes=successes, error=exc)
-            raise
+            return successes
         except Exception as exc:
             failures += 1
             if failures > generator_retry_attempts:

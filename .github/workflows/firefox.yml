@@ -11,6 +11,10 @@ on:
         description: Roblox session pool
         required: true
         default: global
+      max_successes:
+        description: Stop after this many successful imports (0 means continue until CAPTCHA)
+        required: true
+        default: "0"
 
 jobs:
   build:
@@ -28,6 +32,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
       - name: Set up virtual display
         run: |
           Xvfb :99 -screen 0 1920x1080x24 &
@@ -41,6 +48,7 @@ jobs:
           ROBLOX_SESSION_INGEST_POOL: ${{ inputs.ingest_pool }}
           GENERATOR_ARTIFACT_DIR: artifacts/generator
           GENERATOR_RETRY_ATTEMPTS: "5"
+          GENERATOR_MAX_SUCCESSES: ${{ inputs.max_successes }}
           AGE_VERIFICATION_ENABLED: "false"
           PYTHONUNBUFFERED: "1"
         run: |
