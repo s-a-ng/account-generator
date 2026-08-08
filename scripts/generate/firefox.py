@@ -5,9 +5,7 @@ import getpass
 import requests
 import re
 import random
-import signal
 import string
-import subprocess
 import time
 import traceback
 from datetime import datetime, timezone
@@ -20,12 +18,10 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from pymailtm import Account
+from ageverify import AgeVerificationConfig, verify_age
 from username_generator import generate_username
 from session_context import seed_hba_keypair
 
-VIDEO_PATH = "9089uilbo0890"
-LOOPBACK_DEV = "pio;jk;jk;;2"
-_ffmpeg_proc = None
 ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
 CURRENT_STEP = "startup"
 CREATE_ACCOUNT_URL = "https://www.roblox.com/CreateAccount"
@@ -101,6 +97,16 @@ def env_int(name, default):
         raise RuntimeError(f"{name} must be greater than zero")
     return value
 
+def env_bool(name, default):
+    raw = os.getenv(name, str(default)).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(
+        f"{name} must be one of: 1, 0, true, false, yes, no, on, off"
+    )
+
 def artifact_path(label, suffix):
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_") or "artifact"
@@ -142,31 +148,6 @@ def report_exception(context, exc, driver=None):
     except Exception:
         pass
     save_browser_artifacts(driver, f"{context}-{CURRENT_STEP}")
-
-def start_fake_webcam():
-    global _ffmpeg_proc
-    if _ffmpeg_proc and _ffmpeg_proc.poll() is None:
-        return
-    if not os.path.exists(LOOPBACK_DEV):
-        raise RuntimeError(f"{LOOPBACK_DEV} missing — load v4l2loopback first")
-    if not os.path.exists(VIDEO_PATH):
-        raise RuntimeError(f"video {VIDEO_PATH} not found — set FAKE_CAM_VIDEO")
-    _ffmpeg_proc = subprocess.Popen([
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-stream_loop", "-1", "-re", "-i", VIDEO_PATH,
-        "-vf", "scale=1280:720,fps=30,format=yuv420p",
-        "-f", "v4l2", LOOPBACK_DEV,
-    ], stdin=subprocess.DEVNULL)
-    time.sleep(1)
-
-def stop_fake_webcam():
-    global _ffmpeg_proc
-    if _ffmpeg_proc and _ffmpeg_proc.poll() is None:
-        _ffmpeg_proc.send_signal(signal.SIGINT)
-        try:
-            _ffmpeg_proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            _ffmpeg_proc.kill()
 
 def generateUsername():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
@@ -255,6 +236,7 @@ POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
 roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
 generator_retry_attempts = env_int("GENERATOR_RETRY_ATTEMPTS", 5)
+age_verification_enabled = env_bool("AGE_VERIFICATION_ENABLED", True)
 
 hba_material = None
 
@@ -270,6 +252,10 @@ def validate_environment():
         raise RuntimeError("ROBLOX_SESSION_INGEST_DIVISION must be 64 characters or fewer")
     if upload_pool == "project" or not POOL_NAME_PATTERN.match(upload_pool):
         raise RuntimeError("ROBLOX_SESSION_INGEST_POOL must use lowercase letters, numbers, underscores, or hyphens")
+    age_verification_config = None
+    if age_verification_enabled:
+        age_verification_config = AgeVerificationConfig.from_environment()
+        age_verification_config.validate_runtime()
     log(
         "Configuration loaded",
         display=os.getenv("DISPLAY", "<missing>"),
@@ -279,6 +265,17 @@ def validate_environment():
         upload_enqueue_timeout_seconds=upload_enqueue_timeout_seconds,
         roblox_page_retry_attempts=roblox_page_retry_attempts,
         generator_retry_attempts=generator_retry_attempts,
+        age_verification_enabled=age_verification_enabled,
+        fake_cam_video=(
+            age_verification_config.video_path
+            if age_verification_config is not None
+            else "<disabled>"
+        ),
+        fake_cam_device=(
+            age_verification_config.loopback_device
+            if age_verification_config is not None
+            else "<disabled>"
+        ),
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
         artifacts=ARTIFACT_DIR,
@@ -456,38 +453,6 @@ def verify_email_address(driver):
     return False
 
 
-def age_verify(driver):
-    print("Starting age verification...")
-    driver.get("https://www.roblox.com/my/account#!/info")
-    wait = WebDriverWait(driver, 30)
-
-    cam_btn = wait.until(EC.element_to_be_clickable((
-        By.XPATH,
-        "//div[contains(@class,'age-verification-upsell-banner')]"
-        "//button[.//span[normalize-space()='Continue with camera']]"
-    )))
-    cam_btn.click()
-    print("Clicked 'Continue with camera'.")
-    random_sleep(1, 2)
-
-    persona_iframe = wait.until(EC.presence_of_element_located((
-        By.CSS_SELECTOR, 'iframe.persona-widget__iframe'
-    )))
-    driver.switch_to.frame(persona_iframe)
-    print("Switched into Persona iframe.")
-
-    try:
-        continue_btn = wait.until(EC.element_to_be_clickable((
-            By.XPATH, "//button[.//span[normalize-space()='Continue'] or normalize-space()='Continue']"
-        )))
-        continue_btn.click()
-        print("Clicked Continue inside Persona widget.")
-        random_sleep(1, 2)
-        return True
-    finally:
-        driver.switch_to.default_content()
-
-
 def poll_for_captcha(driver, timeout_seconds=120):
     started = time.time()
     while True: 
@@ -575,6 +540,64 @@ def upload_session_cookie(cookie):
         f"body={response_body_preview(response)}"
     )
 
+
+def create_account(driver):
+    global hba_material
+
+    if not PASSWORD:
+        raise RuntimeError("PASSWORD is required to create an account")
+
+    for signup_reload in range(0, MAX_SIGNUP_RELOADS + 1):
+        set_step("open-signup")
+        driver.get(CREATE_ACCOUNT_URL)
+        log(
+            "Accessed Roblox account creation page",
+            attempt=f"{signup_reload + 1}/{MAX_SIGNUP_RELOADS + 1}",
+            url=redacted_url(driver.current_url),
+        )
+
+        if hba_material is None:
+            set_step("seed-hba")
+            hba_material = seed_hba_keypair(driver)
+            log(
+                "Seeded browser HBA key",
+                public_key=secret_summary(hba_material.public_key_spki),
+                indexed_db=hba_material.db_name,
+                object_store=hba_material.object_store_name,
+                key=hba_material.key_name,
+            )
+
+        set_step("fill-signup")
+        fill_out_page(driver)
+
+        set_step("wait-signup-result")
+        try:
+            poll_for_captcha(driver)
+            break
+        except SignupRetry as exc:
+            if signup_reload >= MAX_SIGNUP_RELOADS:
+                raise RuntimeError(
+                    f"Exceeded {MAX_SIGNUP_RELOADS} signup page reloads"
+                ) from exc
+            log(
+                "Reloading signup page after retryable signup failure",
+                reload=f"{signup_reload + 1}/{MAX_SIGNUP_RELOADS}",
+                reason=exc,
+            )
+            random_sleep(1.5, 3.0)
+
+    roblosecurity_cookie = driver.get_cookie(".ROBLOSECURITY")
+    if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
+        raise RuntimeError(
+            ".ROBLOSECURITY cookie was not found after account creation"
+        )
+    log(
+        "Account session created",
+        cookie=secret_summary(roblosecurity_cookie["value"]),
+    )
+    return roblosecurity_cookie["value"]
+
+
 def main():
     global hba_material
     driver = None
@@ -594,42 +617,7 @@ def main():
         driver = Firefox(options=opts)
 
         log("Browser initialized")
-        for signup_reload in range(0, MAX_SIGNUP_RELOADS + 1):
-            set_step("open-signup")
-            driver.get(CREATE_ACCOUNT_URL)
-            log(
-                "Accessed Roblox account creation page",
-                attempt=f"{signup_reload + 1}/{MAX_SIGNUP_RELOADS + 1}",
-                url=redacted_url(driver.current_url),
-            )
-
-            if hba_material is None:
-                set_step("seed-hba")
-                hba_material = seed_hba_keypair(driver)
-                log(
-                    "Seeded browser HBA key",
-                    public_key=secret_summary(hba_material.public_key_spki),
-                    indexed_db=hba_material.db_name,
-                    object_store=hba_material.object_store_name,
-                    key=hba_material.key_name,
-            )
-
-            set_step("fill-signup")
-            fill_out_page(driver)
-
-            set_step("wait-signup-result")
-            try:
-                poll_for_captcha(driver)
-                break
-            except SignupRetry as exc:
-                if signup_reload >= MAX_SIGNUP_RELOADS:
-                    raise RuntimeError(f"Exceeded {MAX_SIGNUP_RELOADS} signup page reloads") from exc
-                log(
-                    "Reloading signup page after retryable signup failure",
-                    reload=f"{signup_reload + 1}/{MAX_SIGNUP_RELOADS}",
-                    reason=exc,
-                )
-                random_sleep(1.5, 3.0)
+        create_account(driver)
 
         set_step("email-verification")
         verified = verify_email_address(driver)
@@ -637,6 +625,20 @@ def main():
             print("Email verified.", flush=True)
         else:
             print("Email verification failed.", flush=True)
+
+        if age_verification_enabled:
+            set_step("age-verification")
+            age_verification_cookie = driver.get_cookie(".ROBLOSECURITY")
+            if not age_verification_cookie or not age_verification_cookie.get("value"):
+                raise RuntimeError(
+                    ".ROBLOSECURITY cookie was not found before age verification"
+                )
+            verify_age(
+                driver,
+                age_verification_cookie["value"],
+                config=AgeVerificationConfig.from_environment(),
+                logger=log,
+            )
 
         set_step("session-capture")
         roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
@@ -695,7 +697,7 @@ def run_loop():
             exit()
         except CaptchaDetected as exc:
             log("Stopping generator after captcha", successes=successes, error=exc)
-            return
+            raise
         except Exception as exc:
             failures += 1
             if failures > generator_retry_attempts:

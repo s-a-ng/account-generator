@@ -97,14 +97,7 @@ class HbaMaterial:
 
     def upload_payload(self):
         return {
-            "hba_public_key": self.public_key_spki,
             "hba_private_key_jwk": json.dumps(self.private_key_jwk, separators=(",", ":")),
-            "hba_public_key_jwk": json.dumps(self.public_key_jwk, separators=(",", ":")),
-            "hba_indexed_db_name": self.db_name,
-            "hba_indexed_db_object_store_name": self.object_store_name,
-            "hba_indexed_db_key_name": self.key_name,
-            "hba_indexed_db_version": self.db_version,
-            "hba_key_created_at": self.created_at,
         }
 
 
