@@ -48,6 +48,9 @@ class CaptchaDetected(RuntimeError):
 class SessionImportFailed(RuntimeError):
     pass
 
+class BrowserReauthenticationDiagnosticFailed(RuntimeError):
+    pass
+
 def utc_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -859,10 +862,15 @@ def main():
 
         if browser_reauth_diagnostic:
             set_step("browser-reauth-diagnostic")
-            browser_reauth_result = browser_reauthenticate(driver, hba_material)
+            try:
+                browser_reauth_result = browser_reauthenticate(driver, hba_material)
+            except Exception as exc:
+                raise BrowserReauthenticationDiagnosticFailed(
+                    f"Browser reauthentication diagnostic did not complete: {exc}"
+                ) from exc
             log("Browser reauthentication diagnostic", **browser_reauth_result)
             if not browser_reauth_result.get("ok"):
-                raise RuntimeError(
+                raise BrowserReauthenticationDiagnosticFailed(
                     "Browser reauthentication diagnostic was rejected: "
                     f"status={browser_reauth_result.get('reauth_status')} "
                     f"authenticated_after_status="
@@ -944,6 +952,13 @@ def run_loop(generate=None, max_successes=None):
         except SessionImportFailed as exc:
             log(
                 "Stopping generator after session import failure",
+                successes=successes,
+                error=exc,
+            )
+            raise
+        except BrowserReauthenticationDiagnosticFailed as exc:
+            log(
+                "Stopping generator after browser reauthentication diagnostic failure",
                 successes=successes,
                 error=exc,
             )

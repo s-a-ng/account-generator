@@ -87,6 +87,20 @@ HBA_REQUEST_OBSERVER_SCRIPT = r"""
 (() => {
   const storageKey = "roblox_hba_intent_observations";
 
+  function loadObservations() {
+    try {
+      return JSON.parse(sessionStorage.getItem(storageKey) || "[]");
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function saveObservation(observation) {
+    const existing = loadObservations();
+    existing.push(observation);
+    sessionStorage.setItem(storageKey, JSON.stringify(existing.slice(-40)));
+  }
+
   function findIntent(value, depth = 0) {
     if (!value || typeof value !== "object" || depth > 4) return null;
     const direct = value.secureAuthenticationIntent || value.SecureAuthenticationIntent;
@@ -98,41 +112,85 @@ HBA_REQUEST_OBSERVER_SCRIPT = r"""
     return null;
   }
 
-  function record(url, body) {
+  function inspectIntent(body) {
     try {
       const parsed = typeof body === "string" ? JSON.parse(body) : body;
       const intent = findIntent(parsed);
-      if (!intent) return;
-      const target = new URL(String(url || ""), window.location.href);
-      const existing = JSON.parse(sessionStorage.getItem(storageKey) || "[]");
-      existing.push({
-        endpoint: `${target.origin}${target.pathname}`,
+      if (!intent) return null;
+      return {
         client_public_key: intent.clientPublicKey,
         timestamp_type: typeof intent.clientEpochTimestamp,
         signature_length: String(intent.saiSignature || "").length,
-      });
-      sessionStorage.setItem(storageKey, JSON.stringify(existing.slice(-20)));
-    } catch (_) {}
+      };
+    } catch (_) {
+      return null;
+    }
   }
 
   if (window.__robloxHbaObserverInstalled) return;
   window.__robloxHbaObserverInstalled = true;
 
   const originalOpen = XMLHttpRequest.prototype.open;
+  const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
   const originalSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function(method, url, ...args) {
     this.__robloxHbaObservedUrl = url;
+    this.__robloxHbaObservedMethod = String(method || "").toUpperCase();
+    this.__robloxHbaObservedHeaders = [];
     return originalOpen.call(this, method, url, ...args);
   };
+  XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+    try {
+      this.__robloxHbaObservedHeaders.push(String(name || "").toLowerCase());
+    } catch (_) {}
+    return originalSetRequestHeader.call(this, name, value);
+  };
   XMLHttpRequest.prototype.send = function(body) {
-    record(this.__robloxHbaObservedUrl, body);
+    let target = null;
+    try {
+      target = new URL(String(this.__robloxHbaObservedUrl || ""), window.location.href);
+    } catch (_) {}
+    const intent = inspectIntent(body);
+    if (intent && target) {
+      const observation = {
+        transport: "xhr",
+        endpoint: `${target.origin}${target.pathname}`,
+        method: this.__robloxHbaObservedMethod,
+        request_header_names: Array.from(new Set(this.__robloxHbaObservedHeaders || [])).sort(),
+        request_body_length: typeof body === "string" ? body.length : null,
+        ...intent,
+      };
+      this.addEventListener("loadend", () => {
+        observation.response_status = Number(this.status || 0);
+        observation.response_has_xsrf = Boolean(this.getResponseHeader("x-csrf-token"));
+        observation.response_challenge_type = this.getResponseHeader("rblx-challenge-type") || null;
+        saveObservation(observation);
+      }, { once: true });
+    }
     return originalSend.call(this, body);
   };
 
   const originalFetch = window.fetch;
   if (typeof originalFetch === "function") {
     window.fetch = function(input, init = {}) {
-      record(typeof input === "string" ? input : input && input.url, init.body);
+      const intent = inspectIntent(init.body);
+      if (intent) {
+        try {
+          const target = new URL(
+            typeof input === "string" ? input : input && input.url,
+            window.location.href,
+          );
+          const headers = new Headers(init.headers || {});
+          saveObservation({
+            transport: "fetch",
+            endpoint: `${target.origin}${target.pathname}`,
+            method: String(init.method || "GET").toUpperCase(),
+            request_header_names: Array.from(headers.keys()).map((name) => name.toLowerCase()).sort(),
+            request_body_length: typeof init.body === "string" ? init.body.length : null,
+            ...intent,
+          });
+        } catch (_) {}
+      }
       return originalFetch.call(this, input, init);
     };
   }
@@ -202,6 +260,24 @@ const [expectedPublicKey] = arguments;
 const done = arguments[arguments.length - 1];
 const reauthUrl = "https://auth.roblox.com/v1/logoutfromallsessionsandreauthenticate";
 const authenticatedUrl = "https://users.roblox.com/v1/users/authenticated";
+const observationStorageKey = "roblox_hba_intent_observations";
+
+function timeoutResult(milliseconds) {
+  return new Promise((resolve) => setTimeout(
+    () => resolve({ settled: false, timeout_ms: milliseconds }),
+    milliseconds,
+  ));
+}
+
+function reauthObservations() {
+  try {
+    return JSON.parse(sessionStorage.getItem(observationStorageKey) || "[]")
+      .filter((entry) => entry && entry.endpoint === reauthUrl)
+      .slice(-4);
+  } catch (_) {
+    return [];
+  }
+}
 
 (async () => {
   const cryptoUtil = window.CoreRobloxUtilities && window.CoreRobloxUtilities.cryptoUtil;
@@ -215,38 +291,55 @@ const authenticatedUrl = "https://users.roblox.com/v1/users/authenticated";
 
   const intent = await cryptoUtil.generateSecureAuthIntentV2();
   if (!intent) throw new Error("Roblox secure-auth intent generator returned no intent");
+  const xsrfPresentBefore = Boolean(localStorage.getItem("x-csrf-token"));
 
-  let reauthStatus = null;
-  let responseCode = null;
-  let responseMessage = null;
-  try {
-    const response = await httpService.post(
-      { url: reauthUrl, withCredentials: true, timeout: 10000 },
-      { secureAuthenticationIntent: intent },
-    );
-    reauthStatus = response && (response.status ?? response.statusCode ?? 200);
-  } catch (error) {
-    const response = error && error.response;
-    const responseBody = (response && response.data) || (error && error.data) || null;
-    reauthStatus = (response && response.status) || (error && (error.status || error.statusCode)) || null;
-    responseCode = responseBody && (responseBody.code ?? responseBody.errorCode ?? null);
-    responseMessage = responseBody && String(responseBody.message || responseBody.error || "").slice(0, 160);
-  }
+  const reauthOperation = (async () => {
+    try {
+      const response = await httpService.post(
+        { url: reauthUrl, withCredentials: true, timeout: 10000 },
+        { secureAuthenticationIntent: intent },
+      );
+      return {
+        settled: true,
+        status: response && (response.status ?? response.statusCode ?? 200),
+        response_code: null,
+        response_message: null,
+      };
+    } catch (error) {
+      const response = error && error.response;
+      const responseBody = (response && response.data) || (error && error.data) || null;
+      return {
+        settled: true,
+        status: (response && response.status) || (error && (error.status || error.statusCode)) || null,
+        response_code: responseBody && (responseBody.code ?? responseBody.errorCode ?? null),
+        response_message: responseBody && String(responseBody.message || responseBody.error || "").slice(0, 160),
+      };
+    }
+  })();
+  const reauthOutcome = await Promise.race([reauthOperation, timeoutResult(15000)]);
 
-  const authenticatedResponse = await fetch(authenticatedUrl, {
-    method: "GET",
-    credentials: "include",
-  });
+  const authenticatedOutcome = await Promise.race([
+    fetch(authenticatedUrl, { method: "GET", credentials: "include" })
+      .then((response) => ({ status: response.status }))
+      .catch((error) => ({ status: null, error: String(error && error.message ? error.message : error) })),
+    timeoutResult(5000),
+  ]);
+  const reauthStatus = reauthOutcome.status ?? null;
+  const authenticatedStatus = authenticatedOutcome.status ?? null;
   done({
-    ok: reauthStatus >= 200 && reauthStatus < 300 && authenticatedResponse.ok,
+    ok: reauthStatus >= 200 && reauthStatus < 300 && authenticatedStatus === 200,
     implementation: "roblox_core_utilities_v2",
+    reauth_settled: reauthOutcome.settled,
     reauth_status: reauthStatus,
-    authenticated_after_status: authenticatedResponse.status,
-    response_code: responseCode,
-    response_message: responseMessage,
+    reauth_timeout_ms: reauthOutcome.timeout_ms || null,
+    authenticated_after_status: authenticatedStatus,
+    response_code: reauthOutcome.response_code ?? null,
+    response_message: reauthOutcome.response_message ?? null,
+    xsrf_present_before: xsrfPresentBefore,
     intent_public_key_matches_seed: intent.clientPublicKey === expectedPublicKey,
     intent_timestamp_type: typeof intent.clientEpochTimestamp,
     intent_signature_length: String(intent.saiSignature || "").length,
+    request_observations: reauthObservations(),
   });
 })().catch((error) => done({
   ok: false,

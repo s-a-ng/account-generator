@@ -105,6 +105,8 @@ class HbaMaterialTests(unittest.TestCase):
     def test_browser_reauthentication_uses_current_v2_intent_helper(self):
         self.assertIn("generateSecureAuthIntentV2", BROWSER_REAUTH_SCRIPT)
         self.assertNotIn("generateSecureAuthIntent()", BROWSER_REAUTH_SCRIPT)
+        self.assertIn("Promise.race", BROWSER_REAUTH_SCRIPT)
+        self.assertIn("request_observations", BROWSER_REAUTH_SCRIPT)
 
 
 if __name__ == "__main__":

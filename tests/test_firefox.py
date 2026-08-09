@@ -70,6 +70,23 @@ class GeneratorLoopTests(unittest.TestCase):
 
         self.assertEqual(calls, 1)
 
+    def test_browser_reauthentication_diagnostic_failure_does_not_create_another_account(self):
+        calls = 0
+
+        def generate():
+            nonlocal calls
+            calls += 1
+            raise firefox.BrowserReauthenticationDiagnosticFailed("rejected")
+
+        with patch.object(firefox, "log"):
+            with self.assertRaisesRegex(
+                firefox.BrowserReauthenticationDiagnosticFailed,
+                "rejected",
+            ):
+                firefox.run_loop(generate=generate, max_successes=1)
+
+        self.assertEqual(calls, 1)
+
     def test_existing_account_diagnostic_fails_without_retrying(self):
         calls = 0
 
