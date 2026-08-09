@@ -21,6 +21,7 @@ from pymailtm import Account
 from ageverify import AgeVerificationConfig, verify_age
 from username_generator import generate_username
 from session_context import (
+    browser_reauthenticate,
     inspect_hba_keypair,
     install_hba_request_observer,
     seed_hba_keypair,
@@ -257,6 +258,7 @@ roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
 generator_retry_attempts = env_int("GENERATOR_RETRY_ATTEMPTS", 5)
 generator_max_successes = env_nonnegative_int("GENERATOR_MAX_SUCCESSES", 0)
 age_verification_enabled = env_bool("AGE_VERIFICATION_ENABLED", True)
+browser_reauth_diagnostic = env_bool("BROWSER_REAUTH_DIAGNOSTIC", False)
 
 hba_material = None
 
@@ -289,6 +291,7 @@ def validate_environment():
         generator_retry_attempts=generator_retry_attempts,
         generator_max_successes=generator_max_successes or "until-captcha",
         age_verification_enabled=age_verification_enabled,
+        browser_reauth_diagnostic=browser_reauth_diagnostic,
         fake_cam_video=(
             age_verification_config.video_path
             if age_verification_config is not None
@@ -791,6 +794,19 @@ def main():
             ),
             selected_public_key=secret_summary(hba_material.public_key_spki),
         )
+
+        if browser_reauth_diagnostic:
+            set_step("browser-reauth-diagnostic")
+            browser_reauth_result = browser_reauthenticate(driver, hba_material)
+            log("Browser reauthentication diagnostic", **browser_reauth_result)
+            if not browser_reauth_result.get("ok"):
+                raise RuntimeError(
+                    "Browser reauthentication diagnostic was rejected: "
+                    f"status={browser_reauth_result.get('reauth_status')} "
+                    f"authenticated_after_status="
+                    f"{browser_reauth_result.get('authenticated_after_status')} "
+                    f"error={browser_reauth_result.get('error')}"
+                )
 
         set_step("session-capture")
         roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')

@@ -197,6 +197,145 @@ function getKeyPair() {
 }));
 """
 
+BROWSER_REAUTH_SCRIPT = r"""
+const [dbName, objectStoreName, keyName, dbVersion] = arguments;
+const done = arguments[arguments.length - 1];
+const logoutUrl = "https://auth.roblox.com/v2/logout";
+const nonceUrl = "https://apis.roblox.com/hba-service/v1/getServerNonce";
+const reauthUrl = "https://auth.roblox.com/v1/logoutfromallsessionsandreauthenticate";
+const authenticatedUrl = "https://users.roblox.com/v1/users/authenticated";
+const encoder = new TextEncoder();
+
+function base64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function getKeyPair() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(dbName, dbVersion);
+    request.onerror = () => reject(request.error || new Error("IndexedDB open failed"));
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction(objectStoreName, "readonly");
+      const get = tx.objectStore(objectStoreName).get(keyName);
+      get.onsuccess = () => resolve(get.result);
+      get.onerror = () => reject(get.error || new Error("IndexedDB get failed"));
+      tx.oncomplete = () => db.close();
+    };
+  });
+}
+
+async function sign(privateKey, payload) {
+  return base64(await crypto.subtle.sign(
+    { name: "ECDSA", hash: { name: "SHA-256" } },
+    privateKey,
+    encoder.encode(payload),
+  ));
+}
+
+async function bodyHash(bodyText = "") {
+  return base64(await crypto.subtle.digest("SHA-256", encoder.encode(bodyText)));
+}
+
+async function boundAuthToken(privateKey, url, method, bodyText = "") {
+  const hash = await bodyHash(bodyText);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const upperMethod = method.toUpperCase();
+  const path = new URL(url).pathname;
+  const signatures = await Promise.all([
+    sign(privateKey, [hash, timestamp, url, upperMethod].join("|")),
+    sign(privateKey, ["", timestamp, path, upperMethod].join("|")),
+  ]);
+  return ["v1", hash, timestamp, ...signatures].join("|");
+}
+
+(async () => {
+  const keyPair = await getKeyPair();
+  if (!keyPair || !keyPair.privateKey || !keyPair.publicKey) {
+    throw new Error("Stored HBA key pair is missing");
+  }
+
+  const logoutResponse = await fetch(logoutUrl, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "content-type": "application/json",
+      "x-bound-auth-token": await boundAuthToken(keyPair.privateKey, logoutUrl, "POST"),
+    },
+  });
+  const xsrf = logoutResponse.headers.get("x-csrf-token");
+  if (!xsrf) throw new Error(`XSRF request returned ${logoutResponse.status} without a token`);
+
+  const nonceResponse = await fetch(nonceUrl, {
+    method: "GET",
+    credentials: "include",
+    headers: {
+      "x-bound-auth-token": await boundAuthToken(keyPair.privateKey, nonceUrl, "GET"),
+    },
+  });
+  if (!nonceResponse.ok) throw new Error(`Nonce request returned ${nonceResponse.status}`);
+  const nonce = await nonceResponse.json();
+
+  const clientPublicKey = base64(await crypto.subtle.exportKey("spki", keyPair.publicKey));
+  const clientEpochTimestamp = Math.floor(Date.now() / 1000);
+  const saiSignature = await sign(
+    keyPair.privateKey,
+    [clientPublicKey, clientEpochTimestamp, nonce].join("|"),
+  );
+  const bodyText = JSON.stringify({
+    secureAuthenticationIntent: {
+      clientPublicKey,
+      clientEpochTimestamp,
+      saiSignature,
+      serverNonce: nonce,
+    },
+  });
+  const reauthResponse = await fetch(reauthUrl, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "content-type": "application/json",
+      "x-csrf-token": xsrf,
+      "x-bound-auth-token": await boundAuthToken(
+        keyPair.privateKey,
+        reauthUrl,
+        "POST",
+        bodyText,
+      ),
+    },
+    body: bodyText,
+  });
+
+  let responseCode = null;
+  let responseMessage = null;
+  try {
+    const responseBody = await reauthResponse.json();
+    responseCode = responseBody && (responseBody.code ?? responseBody.errorCode ?? null);
+    responseMessage = responseBody && String(responseBody.message || responseBody.error || "").slice(0, 160);
+  } catch (_) {}
+
+  const authenticatedResponse = await fetch(authenticatedUrl, {
+    method: "GET",
+    credentials: "include",
+  });
+  done({
+    ok: reauthResponse.ok && authenticatedResponse.ok,
+    reauth_status: reauthResponse.status,
+    authenticated_after_status: authenticatedResponse.status,
+    response_code: responseCode,
+    response_message: responseMessage,
+  });
+})().catch((error) => done({
+  ok: false,
+  error: String(error && error.message ? error.message : error),
+}));
+"""
+
 
 @dataclass
 class HbaMaterial:
@@ -261,3 +400,16 @@ def inspect_hba_keypair(driver, seeded_material):
     )
     observations = result.get("observations") or []
     return current, observations
+
+
+def browser_reauthenticate(driver, material):
+    result = driver.execute_async_script(
+        BROWSER_REAUTH_SCRIPT,
+        material.db_name,
+        material.object_store_name,
+        material.key_name,
+        material.db_version,
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError(f"Browser reauthentication returned invalid data: {result}")
+    return result

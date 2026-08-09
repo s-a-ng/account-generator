@@ -7,7 +7,7 @@ from pathlib import Path
 GENERATE_DIR = Path(__file__).resolve().parents[1] / "scripts" / "generate"
 sys.path.insert(0, str(GENERATE_DIR))
 
-from session_context import HbaMaterial, inspect_hba_keypair
+from session_context import HbaMaterial, browser_reauthenticate, inspect_hba_keypair
 
 
 class HbaMaterialTests(unittest.TestCase):
@@ -69,6 +69,33 @@ class HbaMaterialTests(unittest.TestCase):
         self.assertEqual(current.private_key_jwk, {"d": "live-private"})
         self.assertEqual(current.created_at, seeded.created_at)
         self.assertEqual(observations, [{"client_public_key": "live-public"}])
+
+    def test_browser_reauthentication_returns_sanitized_result(self):
+        material = HbaMaterial(
+            public_key_spki="public",
+            private_key_jwk={"d": "private"},
+            public_key_jwk={"x": "x"},
+            db_name="hbaDB",
+            object_store_name="hbaObjectStore",
+            key_name="hba_keys",
+            db_version=1,
+            created_at="2026-08-08T00:00:00Z",
+        )
+
+        class Driver:
+            def execute_async_script(self, _script, *args):
+                self.args = args
+                return {
+                    "ok": True,
+                    "reauth_status": 200,
+                    "authenticated_after_status": 200,
+                }
+
+        driver = Driver()
+        result = browser_reauthenticate(driver, material)
+
+        self.assertEqual(driver.args, ("hbaDB", "hbaObjectStore", "hba_keys", 1))
+        self.assertEqual(result["reauth_status"], 200)
 
 
 if __name__ == "__main__":
