@@ -98,33 +98,61 @@ class ImportStatusUrlTests(unittest.TestCase):
             )
 
 
-class SessionUploadTests(unittest.TestCase):
-    def test_upload_leaves_proxy_assignment_to_the_control_server(self):
-        class HbaMaterial:
-            @staticmethod
-            def upload_payload():
-                return {"hba_private_key_jwk": "private-key"}
+class ImportProxyTests(unittest.TestCase):
+    def test_proxy_endpoint_is_derived_from_the_upload_origin(self):
+        with patch.object(
+            firefox,
+            "upload_url",
+            "https://command.botted.org/api/internal/roblox-sessions/import",
+        ):
+            self.assertEqual(
+                firefox.control_endpoint("/api/internal/roblox-sessions/import-proxy"),
+                "https://command.botted.org/api/internal/roblox-sessions/import-proxy",
+            )
 
+    def test_acquired_proxy_is_returned_without_logging_credentials(self):
         class Response:
             status_code = 200
-            text = '{"ok":true,"session":{"session_id":"session-1"}}'
+            text = '{"ok":true,"proxy":"socks5://user:pass@example.test:1080"}'
             headers = {"content-type": "application/json"}
 
             @staticmethod
             def json():
-                return {"ok": True, "session": {"session_id": "session-1"}}
+                return {"ok": True, "proxy": "socks5://user:pass@example.test:1080"}
 
         with (
-            patch.object(firefox, "hba_material", HbaMaterial()),
-            patch.object(firefox.requests, "post", return_value=Response()) as post,
-            patch.object(firefox, "log"),
+            patch.object(firefox.requests, "post", return_value=Response()),
+            patch.object(firefox, "log") as log,
         ):
-            firefox.upload_session_cookie("cookie-value")
+            proxy = firefox.acquire_import_proxy()
 
-        payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["cookie"], "cookie-value")
-        self.assertEqual(payload["hba_private_key_jwk"], "private-key")
-        self.assertNotIn("proxy", payload)
+        self.assertEqual(proxy, "socks5://user:pass@example.test:1080")
+        logged_fields = log.call_args.kwargs
+        self.assertNotIn("user", str(logged_fields))
+        self.assertNotIn("pass", str(logged_fields))
+        self.assertEqual(logged_fields["proxy"]["has_auth"], True)
+
+    def test_split_host_port_accepts_ipv4_hostname_and_ipv6(self):
+        self.assertEqual(firefox.split_host_port("example.test:8080", 80), ("example.test", 8080))
+        self.assertEqual(firefox.split_host_port("example.test", 80), ("example.test", 80))
+        self.assertEqual(firefox.split_host_port("[2001:db8::1]:8443", 443), ("2001:db8::1", 8443))
+
+    def test_firefox_uses_the_local_bridge_for_http_and_https(self):
+        class Options:
+            def __init__(self):
+                self.preferences = {}
+
+            def set_preference(self, key, value):
+                self.preferences[key] = value
+
+        options = Options()
+        firefox.configure_firefox_proxy(options, "http://127.0.0.1:32123")
+
+        self.assertEqual(options.preferences["network.proxy.type"], 1)
+        self.assertEqual(options.preferences["network.proxy.http"], "127.0.0.1")
+        self.assertEqual(options.preferences["network.proxy.http_port"], 32123)
+        self.assertEqual(options.preferences["network.proxy.ssl"], "127.0.0.1")
+        self.assertEqual(options.preferences["network.proxy.ssl_port"], 32123)
 
 
 if __name__ == "__main__":
