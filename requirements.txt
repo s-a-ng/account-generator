@@ -2,4 +2,3 @@ undetected-geckodriver
 selenium
 requests
 pymailtm
-PySocks
