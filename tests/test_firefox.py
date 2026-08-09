@@ -70,17 +70,17 @@ class GeneratorLoopTests(unittest.TestCase):
 
         self.assertEqual(calls, 1)
 
-    def test_browser_reauthentication_diagnostic_failure_does_not_create_another_account(self):
+    def test_browser_session_refresh_diagnostic_failure_does_not_create_another_account(self):
         calls = 0
 
         def generate():
             nonlocal calls
             calls += 1
-            raise firefox.BrowserReauthenticationDiagnosticFailed("rejected")
+            raise firefox.BrowserSessionRefreshDiagnosticFailed("rejected")
 
         with patch.object(firefox, "log"):
             with self.assertRaisesRegex(
-                firefox.BrowserReauthenticationDiagnosticFailed,
+                firefox.BrowserSessionRefreshDiagnosticFailed,
                 "rejected",
             ):
                 firefox.run_loop(generate=generate, max_successes=1)
@@ -97,7 +97,7 @@ class GeneratorLoopTests(unittest.TestCase):
 
         with (
             patch.object(firefox, "log"),
-            patch.object(firefox, "reauth_diagnostic_username", "disposable-user"),
+            patch.object(firefox, "session_refresh_diagnostic_username", "disposable-user"),
         ):
             with self.assertRaisesRegex(RuntimeError, "diagnostic failed"):
                 firefox.run_loop(generate=generate, max_successes=1)
@@ -162,16 +162,16 @@ class SessionUploadTests(unittest.TestCase):
 
 
 class DiagnosticLoginTests(unittest.TestCase):
-    def test_diagnostic_username_requires_browser_reauthentication(self):
+    def test_diagnostic_username_requires_browser_session_refresh(self):
         with (
             patch.object(firefox, "PASSWORD", "password"),
             patch.object(firefox, "upload_key", "upload-key"),
-            patch.object(firefox, "reauth_diagnostic_username", "disposable-user"),
-            patch.object(firefox, "browser_reauth_diagnostic", False),
+            patch.object(firefox, "session_refresh_diagnostic_username", "disposable-user"),
+            patch.object(firefox, "browser_session_refresh_diagnostic", False),
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "REAUTH_DIAGNOSTIC_USERNAME requires BROWSER_REAUTH_DIAGNOSTIC",
+                "SESSION_REFRESH_DIAGNOSTIC_USERNAME requires BROWSER_SESSION_REFRESH_DIAGNOSTIC",
             ):
                 firefox.validate_environment()
 

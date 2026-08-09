@@ -151,14 +151,19 @@ HBA_REQUEST_OBSERVER_SCRIPT = r"""
       target = new URL(String(this.__robloxHbaObservedUrl || ""), window.location.href);
     } catch (_) {}
     const intent = inspectIntent(body);
-    if (intent && target) {
+    const isSessionRefresh = Boolean(
+      target
+      && target.hostname === "auth.roblox.com"
+      && target.pathname === "/v2/session/refresh"
+    );
+    if ((intent || isSessionRefresh) && target) {
       const observation = {
         transport: "xhr",
         endpoint: `${target.origin}${target.pathname}`,
         method: this.__robloxHbaObservedMethod,
         request_header_names: Array.from(new Set(this.__robloxHbaObservedHeaders || [])).sort(),
         request_body_length: typeof body === "string" ? body.length : null,
-        ...intent,
+        ...(intent || {}),
       };
       this.addEventListener("loadend", () => {
         observation.response_status = Number(this.status || 0);
@@ -174,12 +179,16 @@ HBA_REQUEST_OBSERVER_SCRIPT = r"""
   if (typeof originalFetch === "function") {
     window.fetch = function(input, init = {}) {
       const intent = inspectIntent(init.body);
-      if (intent) {
-        try {
-          const target = new URL(
-            typeof input === "string" ? input : input && input.url,
-            window.location.href,
-          );
+      try {
+        const target = new URL(
+          typeof input === "string" ? input : input && input.url,
+          window.location.href,
+        );
+        const isSessionRefresh = (
+          target.hostname === "auth.roblox.com"
+          && target.pathname === "/v2/session/refresh"
+        );
+        if (intent || isSessionRefresh) {
           const headers = new Headers(init.headers || {});
           saveObservation({
             transport: "fetch",
@@ -187,10 +196,10 @@ HBA_REQUEST_OBSERVER_SCRIPT = r"""
             method: String(init.method || "GET").toUpperCase(),
             request_header_names: Array.from(headers.keys()).map((name) => name.toLowerCase()).sort(),
             request_body_length: typeof init.body === "string" ? init.body.length : null,
-            ...intent,
+            ...(intent || {}),
           });
-        } catch (_) {}
-      }
+        }
+      } catch (_) {}
       return originalFetch.call(this, input, init);
     };
   }
@@ -255,10 +264,9 @@ function getKeyPair() {
 }));
 """
 
-BROWSER_REAUTH_SCRIPT = r"""
-const [expectedPublicKey] = arguments;
+BROWSER_SESSION_REFRESH_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
-const reauthUrl = "https://auth.roblox.com/v1/logoutfromallsessionsandreauthenticate";
+const refreshUrl = "https://auth.roblox.com/v2/session/refresh";
 const authenticatedUrl = "https://users.roblox.com/v1/users/authenticated";
 const observationStorageKey = "roblox_hba_intent_observations";
 
@@ -269,10 +277,10 @@ function timeoutResult(milliseconds) {
   ));
 }
 
-function reauthObservations() {
+function refreshObservations() {
   try {
     return JSON.parse(sessionStorage.getItem(observationStorageKey) || "[]")
-      .filter((entry) => entry && entry.endpoint === reauthUrl)
+      .filter((entry) => entry && entry.endpoint === refreshUrl)
       .slice(-4);
   } catch (_) {
     return [];
@@ -280,24 +288,18 @@ function reauthObservations() {
 }
 
 (async () => {
-  const cryptoUtil = window.CoreRobloxUtilities && window.CoreRobloxUtilities.cryptoUtil;
   const httpService = window.CoreUtilities && window.CoreUtilities.httpService;
-  if (!cryptoUtil || typeof cryptoUtil.generateSecureAuthIntentV2 !== "function") {
-    throw new Error("Roblox V2 secure-auth intent generator is unavailable");
-  }
   if (!httpService || typeof httpService.post !== "function") {
     throw new Error("Roblox HTTP service is unavailable");
   }
 
-  const intent = await cryptoUtil.generateSecureAuthIntentV2();
-  if (!intent) throw new Error("Roblox secure-auth intent generator returned no intent");
   const xsrfPresentBefore = Boolean(localStorage.getItem("x-csrf-token"));
 
-  const reauthOperation = (async () => {
+  const refreshOperation = (async () => {
     try {
       const response = await httpService.post(
-        { url: reauthUrl, withCredentials: true, timeout: 10000 },
-        { secureAuthenticationIntent: intent },
+        { url: refreshUrl, withCredentials: true, timeout: 10000 },
+        {},
       );
       return {
         settled: true,
@@ -316,7 +318,7 @@ function reauthObservations() {
       };
     }
   })();
-  const reauthOutcome = await Promise.race([reauthOperation, timeoutResult(15000)]);
+  const refreshOutcome = await Promise.race([refreshOperation, timeoutResult(15000)]);
 
   const authenticatedOutcome = await Promise.race([
     fetch(authenticatedUrl, { method: "GET", credentials: "include" })
@@ -324,22 +326,19 @@ function reauthObservations() {
       .catch((error) => ({ status: null, error: String(error && error.message ? error.message : error) })),
     timeoutResult(5000),
   ]);
-  const reauthStatus = reauthOutcome.status ?? null;
+  const refreshStatus = refreshOutcome.status ?? null;
   const authenticatedStatus = authenticatedOutcome.status ?? null;
   done({
-    ok: reauthStatus >= 200 && reauthStatus < 300 && authenticatedStatus === 200,
-    implementation: "roblox_core_utilities_v2",
-    reauth_settled: reauthOutcome.settled,
-    reauth_status: reauthStatus,
-    reauth_timeout_ms: reauthOutcome.timeout_ms || null,
+    ok: refreshStatus >= 200 && refreshStatus < 300 && authenticatedStatus === 200,
+    implementation: "roblox_v2_session_refresh",
+    refresh_settled: refreshOutcome.settled,
+    refresh_status: refreshStatus,
+    refresh_timeout_ms: refreshOutcome.timeout_ms || null,
     authenticated_after_status: authenticatedStatus,
-    response_code: reauthOutcome.response_code ?? null,
-    response_message: reauthOutcome.response_message ?? null,
+    response_code: refreshOutcome.response_code ?? null,
+    response_message: refreshOutcome.response_message ?? null,
     xsrf_present_before: xsrfPresentBefore,
-    intent_public_key_matches_seed: intent.clientPublicKey === expectedPublicKey,
-    intent_timestamp_type: typeof intent.clientEpochTimestamp,
-    intent_signature_length: String(intent.saiSignature || "").length,
-    request_observations: reauthObservations(),
+    request_observations: refreshObservations(),
   });
 })().catch((error) => done({
   ok: false,
@@ -413,11 +412,8 @@ def inspect_hba_keypair(driver, seeded_material):
     return current, observations
 
 
-def browser_reauthenticate(driver, material):
-    result = driver.execute_async_script(
-        BROWSER_REAUTH_SCRIPT,
-        material.public_key_spki,
-    )
+def browser_refresh_session(driver):
+    result = driver.execute_async_script(BROWSER_SESSION_REFRESH_SCRIPT)
     if not isinstance(result, dict):
-        raise RuntimeError(f"Browser reauthentication returned invalid data: {result}")
+        raise RuntimeError(f"Browser session refresh returned invalid data: {result}")
     return result

@@ -8,9 +8,9 @@ GENERATE_DIR = Path(__file__).resolve().parents[1] / "scripts" / "generate"
 sys.path.insert(0, str(GENERATE_DIR))
 
 from session_context import (
-    BROWSER_REAUTH_SCRIPT,
+    BROWSER_SESSION_REFRESH_SCRIPT,
     HbaMaterial,
-    browser_reauthenticate,
+    browser_refresh_session,
     inspect_hba_keypair,
 )
 
@@ -75,38 +75,28 @@ class HbaMaterialTests(unittest.TestCase):
         self.assertEqual(current.created_at, seeded.created_at)
         self.assertEqual(observations, [{"client_public_key": "live-public"}])
 
-    def test_browser_reauthentication_returns_sanitized_result(self):
-        material = HbaMaterial(
-            public_key_spki="public",
-            private_key_jwk={"d": "private"},
-            public_key_jwk={"x": "x"},
-            db_name="hbaDB",
-            object_store_name="hbaObjectStore",
-            key_name="hba_keys",
-            db_version=1,
-            created_at="2026-08-08T00:00:00Z",
-        )
-
+    def test_browser_session_refresh_returns_sanitized_result(self):
         class Driver:
             def execute_async_script(self, _script, *args):
                 self.args = args
                 return {
                     "ok": True,
-                    "reauth_status": 200,
+                    "refresh_status": 200,
                     "authenticated_after_status": 200,
                 }
 
         driver = Driver()
-        result = browser_reauthenticate(driver, material)
+        result = browser_refresh_session(driver)
 
-        self.assertEqual(driver.args, ("public",))
-        self.assertEqual(result["reauth_status"], 200)
+        self.assertEqual(driver.args, ())
+        self.assertEqual(result["refresh_status"], 200)
 
-    def test_browser_reauthentication_uses_current_v2_intent_helper(self):
-        self.assertIn("generateSecureAuthIntentV2", BROWSER_REAUTH_SCRIPT)
-        self.assertNotIn("generateSecureAuthIntent()", BROWSER_REAUTH_SCRIPT)
-        self.assertIn("Promise.race", BROWSER_REAUTH_SCRIPT)
-        self.assertIn("request_observations", BROWSER_REAUTH_SCRIPT)
+    def test_browser_session_refresh_uses_current_first_party_endpoint(self):
+        self.assertIn("/v2/session/refresh", BROWSER_SESSION_REFRESH_SCRIPT)
+        self.assertNotIn("logoutfromallsessionsandreauthenticate", BROWSER_SESSION_REFRESH_SCRIPT)
+        self.assertNotIn("generateSecureAuthIntent", BROWSER_SESSION_REFRESH_SCRIPT)
+        self.assertIn("Promise.race", BROWSER_SESSION_REFRESH_SCRIPT)
+        self.assertIn("request_observations", BROWSER_SESSION_REFRESH_SCRIPT)
 
 
 if __name__ == "__main__":

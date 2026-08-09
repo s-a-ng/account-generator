@@ -21,7 +21,7 @@ from pymailtm import Account
 from ageverify import AgeVerificationConfig, verify_age
 from username_generator import generate_username
 from session_context import (
-    browser_reauthenticate,
+    browser_refresh_session,
     inspect_hba_keypair,
     install_hba_request_observer,
     seed_hba_keypair,
@@ -48,7 +48,7 @@ class CaptchaDetected(RuntimeError):
 class SessionImportFailed(RuntimeError):
     pass
 
-class BrowserReauthenticationDiagnosticFailed(RuntimeError):
+class BrowserSessionRefreshDiagnosticFailed(RuntimeError):
     pass
 
 def utc_timestamp():
@@ -266,8 +266,8 @@ roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
 generator_retry_attempts = env_int("GENERATOR_RETRY_ATTEMPTS", 5)
 generator_max_successes = env_nonnegative_int("GENERATOR_MAX_SUCCESSES", 0)
 age_verification_enabled = env_bool("AGE_VERIFICATION_ENABLED", True)
-browser_reauth_diagnostic = env_bool("BROWSER_REAUTH_DIAGNOSTIC", False)
-reauth_diagnostic_username = os.getenv("REAUTH_DIAGNOSTIC_USERNAME", "").strip()
+browser_session_refresh_diagnostic = env_bool("BROWSER_SESSION_REFRESH_DIAGNOSTIC", False)
+session_refresh_diagnostic_username = os.getenv("SESSION_REFRESH_DIAGNOSTIC_USERNAME", "").strip()
 
 hba_material = None
 
@@ -283,9 +283,9 @@ def validate_environment():
         raise RuntimeError("ROBLOX_SESSION_INGEST_DIVISION must be 64 characters or fewer")
     if upload_pool == "project" or not POOL_NAME_PATTERN.match(upload_pool):
         raise RuntimeError("ROBLOX_SESSION_INGEST_POOL must use lowercase letters, numbers, underscores, or hyphens")
-    if reauth_diagnostic_username and not browser_reauth_diagnostic:
+    if session_refresh_diagnostic_username and not browser_session_refresh_diagnostic:
         raise RuntimeError(
-            "REAUTH_DIAGNOSTIC_USERNAME requires BROWSER_REAUTH_DIAGNOSTIC"
+            "SESSION_REFRESH_DIAGNOSTIC_USERNAME requires BROWSER_SESSION_REFRESH_DIAGNOSTIC"
         )
     age_verification_config = None
     if age_verification_enabled:
@@ -304,8 +304,8 @@ def validate_environment():
         generator_retry_attempts=generator_retry_attempts,
         generator_max_successes=generator_max_successes or "until-captcha",
         age_verification_enabled=age_verification_enabled,
-        browser_reauth_diagnostic=browser_reauth_diagnostic,
-        reauth_diagnostic_username=reauth_diagnostic_username or "<disabled>",
+        browser_session_refresh_diagnostic=browser_session_refresh_diagnostic,
+        session_refresh_diagnostic_username=session_refresh_diagnostic_username or "<disabled>",
         fake_cam_video=(
             age_verification_config.video_path
             if age_verification_config is not None
@@ -800,8 +800,8 @@ def main():
         driver = Firefox(options=opts)
 
         log("Browser initialized")
-        if reauth_diagnostic_username:
-            login_diagnostic_account(driver, reauth_diagnostic_username)
+        if session_refresh_diagnostic_username:
+            login_diagnostic_account(driver, session_refresh_diagnostic_username)
         else:
             create_account(driver)
 
@@ -812,7 +812,7 @@ def main():
             else:
                 print("Email verification failed.", flush=True)
 
-        if age_verification_enabled and not reauth_diagnostic_username:
+        if age_verification_enabled and not session_refresh_diagnostic_username:
             set_step("age-verification")
             age_verification_cookie = driver.get_cookie(".ROBLOSECURITY")
             if not age_verification_cookie or not age_verification_cookie.get("value"):
@@ -860,22 +860,22 @@ def main():
             selected_public_key=secret_summary(hba_material.public_key_spki),
         )
 
-        if browser_reauth_diagnostic:
-            set_step("browser-reauth-diagnostic")
+        if browser_session_refresh_diagnostic:
+            set_step("browser-session-refresh-diagnostic")
             try:
-                browser_reauth_result = browser_reauthenticate(driver, hba_material)
+                browser_refresh_result = browser_refresh_session(driver)
             except Exception as exc:
-                raise BrowserReauthenticationDiagnosticFailed(
-                    f"Browser reauthentication diagnostic did not complete: {exc}"
+                raise BrowserSessionRefreshDiagnosticFailed(
+                    f"Browser session refresh diagnostic did not complete: {exc}"
                 ) from exc
-            log("Browser reauthentication diagnostic", **browser_reauth_result)
-            if not browser_reauth_result.get("ok"):
-                raise BrowserReauthenticationDiagnosticFailed(
-                    "Browser reauthentication diagnostic was rejected: "
-                    f"status={browser_reauth_result.get('reauth_status')} "
+            log("Browser session refresh diagnostic", **browser_refresh_result)
+            if not browser_refresh_result.get("ok"):
+                raise BrowserSessionRefreshDiagnosticFailed(
+                    "Browser session refresh diagnostic was rejected: "
+                    f"status={browser_refresh_result.get('refresh_status')} "
                     f"authenticated_after_status="
-                    f"{browser_reauth_result.get('authenticated_after_status')} "
-                    f"error={browser_reauth_result.get('error')}"
+                    f"{browser_refresh_result.get('authenticated_after_status')} "
+                    f"error={browser_refresh_result.get('error')}"
                 )
 
         set_step("session-capture")
@@ -956,15 +956,15 @@ def run_loop(generate=None, max_successes=None):
                 error=exc,
             )
             raise
-        except BrowserReauthenticationDiagnosticFailed as exc:
+        except BrowserSessionRefreshDiagnosticFailed as exc:
             log(
-                "Stopping generator after browser reauthentication diagnostic failure",
+                "Stopping generator after browser session refresh diagnostic failure",
                 successes=successes,
                 error=exc,
             )
             raise
         except Exception as exc:
-            if reauth_diagnostic_username:
+            if session_refresh_diagnostic_username:
                 log(
                     "Stopping diagnostic after first failure",
                     successes=successes,
