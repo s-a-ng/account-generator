@@ -94,7 +94,7 @@ class HbaMaterialTests(unittest.TestCase):
         driver = Driver()
         result = browser_reauthenticate(driver, material)
 
-        self.assertEqual(driver.args, ("hbaDB", "hbaObjectStore", "hba_keys", 1))
+        self.assertEqual(driver.args, ("public",))
         self.assertEqual(result["reauth_status"], 200)
 
 
