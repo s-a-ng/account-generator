@@ -30,6 +30,7 @@ from session_context import (
 ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
 CURRENT_STEP = "startup"
 CREATE_ACCOUNT_URL = "https://www.roblox.com/CreateAccount"
+LOGIN_URL = "https://www.roblox.com/login"
 ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
 MAX_SIGNUP_RELOADS = 5
 
@@ -259,6 +260,7 @@ generator_retry_attempts = env_int("GENERATOR_RETRY_ATTEMPTS", 5)
 generator_max_successes = env_nonnegative_int("GENERATOR_MAX_SUCCESSES", 0)
 age_verification_enabled = env_bool("AGE_VERIFICATION_ENABLED", True)
 browser_reauth_diagnostic = env_bool("BROWSER_REAUTH_DIAGNOSTIC", False)
+reauth_diagnostic_username = os.getenv("REAUTH_DIAGNOSTIC_USERNAME", "").strip()
 
 hba_material = None
 
@@ -274,6 +276,10 @@ def validate_environment():
         raise RuntimeError("ROBLOX_SESSION_INGEST_DIVISION must be 64 characters or fewer")
     if upload_pool == "project" or not POOL_NAME_PATTERN.match(upload_pool):
         raise RuntimeError("ROBLOX_SESSION_INGEST_POOL must use lowercase letters, numbers, underscores, or hyphens")
+    if reauth_diagnostic_username and not browser_reauth_diagnostic:
+        raise RuntimeError(
+            "REAUTH_DIAGNOSTIC_USERNAME requires BROWSER_REAUTH_DIAGNOSTIC"
+        )
     age_verification_config = None
     if age_verification_enabled:
         age_verification_config = AgeVerificationConfig.from_environment()
@@ -292,6 +298,7 @@ def validate_environment():
         generator_max_successes=generator_max_successes or "until-captcha",
         age_verification_enabled=age_verification_enabled,
         browser_reauth_diagnostic=browser_reauth_diagnostic,
+        reauth_diagnostic_username=reauth_diagnostic_username or "<disabled>",
         fake_cam_video=(
             age_verification_config.video_path
             if age_verification_config is not None
@@ -719,6 +726,53 @@ def create_account(driver):
     return roblosecurity_cookie["value"]
 
 
+def login_diagnostic_account(driver, username):
+    global hba_material
+
+    set_step("open-login")
+    driver.get(LOGIN_URL)
+    log("Opened Roblox login page", url=redacted_url(driver.current_url))
+
+    set_step("seed-hba")
+    hba_material = seed_hba_keypair(driver)
+    install_hba_request_observer(driver)
+    log(
+        "Seeded browser HBA key for diagnostic login",
+        public_key=secret_summary(hba_material.public_key_spki),
+        indexed_db=hba_material.db_name,
+        object_store=hba_material.object_store_name,
+        key=hba_material.key_name,
+    )
+
+    set_step("login-existing-account")
+    wait = WebDriverWait(driver, 20)
+    username_input = wait.until(EC.presence_of_element_located((By.ID, "login-username")))
+    password_input = wait.until(EC.presence_of_element_located((By.ID, "login-password")))
+    username_input.send_keys(username)
+    password_input.send_keys(PASSWORD)
+    wait.until(EC.element_to_be_clickable((By.ID, "login-button"))).click()
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        cookie = driver.get_cookie(".ROBLOSECURITY")
+        if cookie and cookie.get("value"):
+            log("Diagnostic account login succeeded", username=username)
+            return cookie["value"]
+        try:
+            driver.find_element(
+                By.CSS_SELECTOR,
+                'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]',
+            )
+            raise CaptchaDetected("Detected Roblox captcha during diagnostic login")
+        except CaptchaDetected:
+            raise
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    raise RuntimeError("Timed out waiting for diagnostic account login")
+
+
 def main():
     global hba_material
     driver = None
@@ -738,16 +792,19 @@ def main():
         driver = Firefox(options=opts)
 
         log("Browser initialized")
-        create_account(driver)
-
-        set_step("email-verification")
-        verified = verify_email_address(driver)
-        if verified:
-            print("Email verified.", flush=True)
+        if reauth_diagnostic_username:
+            login_diagnostic_account(driver, reauth_diagnostic_username)
         else:
-            print("Email verification failed.", flush=True)
+            create_account(driver)
 
-        if age_verification_enabled:
+            set_step("email-verification")
+            verified = verify_email_address(driver)
+            if verified:
+                print("Email verified.", flush=True)
+            else:
+                print("Email verification failed.", flush=True)
+
+        if age_verification_enabled and not reauth_diagnostic_username:
             set_step("age-verification")
             age_verification_cookie = driver.get_cookie(".ROBLOSECURITY")
             if not age_verification_cookie or not age_verification_cookie.get("value"):

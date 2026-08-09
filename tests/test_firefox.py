@@ -127,5 +127,20 @@ class SessionUploadTests(unittest.TestCase):
         self.assertNotIn("proxy", payload)
 
 
+class DiagnosticLoginTests(unittest.TestCase):
+    def test_diagnostic_username_requires_browser_reauthentication(self):
+        with (
+            patch.object(firefox, "PASSWORD", "password"),
+            patch.object(firefox, "upload_key", "upload-key"),
+            patch.object(firefox, "reauth_diagnostic_username", "disposable-user"),
+            patch.object(firefox, "browser_reauth_diagnostic", False),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "REAUTH_DIAGNOSTIC_USERNAME requires BROWSER_REAUTH_DIAGNOSTIC",
+            ):
+                firefox.validate_environment()
+
+
 if __name__ == "__main__":
     unittest.main()

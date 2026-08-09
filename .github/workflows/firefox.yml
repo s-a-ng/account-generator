@@ -20,6 +20,10 @@ on:
         required: true
         type: boolean
         default: false
+      diagnostic_username:
+        description: Existing disposable account to use instead of signup for reauth diagnostics
+        required: false
+        default: ""
 
 jobs:
   build:
@@ -55,6 +59,7 @@ jobs:
           GENERATOR_RETRY_ATTEMPTS: "5"
           GENERATOR_MAX_SUCCESSES: ${{ inputs.max_successes }}
           BROWSER_REAUTH_DIAGNOSTIC: ${{ inputs.browser_reauth_diagnostic }}
+          REAUTH_DIAGNOSTIC_USERNAME: ${{ inputs.diagnostic_username }}
           AGE_VERIFICATION_ENABLED: "false"
           PYTHONUNBUFFERED: "1"
         run: |
