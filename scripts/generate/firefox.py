@@ -944,6 +944,13 @@ def run_loop(generate=None, max_successes=None):
             )
             raise
         except Exception as exc:
+            if reauth_diagnostic_username:
+                log(
+                    "Stopping diagnostic after first failure",
+                    successes=successes,
+                    error=exc,
+                )
+                raise
             failures += 1
             if failures > generator_retry_attempts:
                 log(

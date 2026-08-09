@@ -70,6 +70,23 @@ class GeneratorLoopTests(unittest.TestCase):
 
         self.assertEqual(calls, 1)
 
+    def test_existing_account_diagnostic_fails_without_retrying(self):
+        calls = 0
+
+        def generate():
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("diagnostic failed")
+
+        with (
+            patch.object(firefox, "log"),
+            patch.object(firefox, "reauth_diagnostic_username", "disposable-user"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "diagnostic failed"):
+                firefox.run_loop(generate=generate, max_successes=1)
+
+        self.assertEqual(calls, 1)
+
 
 class ImportStatusUrlTests(unittest.TestCase):
     def test_same_host_status_url_uses_the_configured_https_scheme(self):

@@ -206,14 +206,14 @@ const authenticatedUrl = "https://users.roblox.com/v1/users/authenticated";
 (async () => {
   const cryptoUtil = window.CoreRobloxUtilities && window.CoreRobloxUtilities.cryptoUtil;
   const httpService = window.CoreUtilities && window.CoreUtilities.httpService;
-  if (!cryptoUtil || typeof cryptoUtil.generateSecureAuthIntent !== "function") {
-    throw new Error("Roblox secure-auth intent generator is unavailable");
+  if (!cryptoUtil || typeof cryptoUtil.generateSecureAuthIntentV2 !== "function") {
+    throw new Error("Roblox V2 secure-auth intent generator is unavailable");
   }
   if (!httpService || typeof httpService.post !== "function") {
     throw new Error("Roblox HTTP service is unavailable");
   }
 
-  const intent = await cryptoUtil.generateSecureAuthIntent();
+  const intent = await cryptoUtil.generateSecureAuthIntentV2();
   if (!intent) throw new Error("Roblox secure-auth intent generator returned no intent");
 
   let reauthStatus = null;
@@ -239,7 +239,7 @@ const authenticatedUrl = "https://users.roblox.com/v1/users/authenticated";
   });
   done({
     ok: reauthStatus >= 200 && reauthStatus < 300 && authenticatedResponse.ok,
-    implementation: "roblox_core_utilities",
+    implementation: "roblox_core_utilities_v2",
     reauth_status: reauthStatus,
     authenticated_after_status: authenticatedResponse.status,
     response_code: responseCode,

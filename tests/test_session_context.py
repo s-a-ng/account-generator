@@ -7,7 +7,12 @@ from pathlib import Path
 GENERATE_DIR = Path(__file__).resolve().parents[1] / "scripts" / "generate"
 sys.path.insert(0, str(GENERATE_DIR))
 
-from session_context import HbaMaterial, browser_reauthenticate, inspect_hba_keypair
+from session_context import (
+    BROWSER_REAUTH_SCRIPT,
+    HbaMaterial,
+    browser_reauthenticate,
+    inspect_hba_keypair,
+)
 
 
 class HbaMaterialTests(unittest.TestCase):
@@ -96,6 +101,10 @@ class HbaMaterialTests(unittest.TestCase):
 
         self.assertEqual(driver.args, ("public",))
         self.assertEqual(result["reauth_status"], 200)
+
+    def test_browser_reauthentication_uses_current_v2_intent_helper(self):
+        self.assertIn("generateSecureAuthIntentV2", BROWSER_REAUTH_SCRIPT)
+        self.assertNotIn("generateSecureAuthIntent()", BROWSER_REAUTH_SCRIPT)
 
 
 if __name__ == "__main__":
