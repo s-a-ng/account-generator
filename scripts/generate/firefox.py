@@ -20,7 +20,11 @@ from selenium.webdriver.support.ui import Select, WebDriverWait
 from pymailtm import Account
 from ageverify import AgeVerificationConfig, verify_age
 from username_generator import generate_username
-from session_context import seed_hba_keypair
+from session_context import (
+    inspect_hba_keypair,
+    install_hba_request_observer,
+    seed_hba_keypair,
+)
 
 ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
 CURRENT_STEP = "startup"
@@ -679,6 +683,8 @@ def create_account(driver):
                 key=hba_material.key_name,
             )
 
+        install_hba_request_observer(driver)
+
         set_step("fill-signup")
         fill_out_page(driver)
 
@@ -751,6 +757,40 @@ def main():
                 config=AgeVerificationConfig.from_environment(),
                 logger=log,
             )
+
+        set_step("verify-hba")
+        seeded_hba_material = hba_material
+        current_hba_material, hba_observations = inspect_hba_keypair(
+            driver,
+            seeded_hba_material,
+        )
+        observed_public_keys = [
+            observation.get("client_public_key")
+            for observation in hba_observations
+            if isinstance(observation, dict) and observation.get("client_public_key")
+        ]
+        observed_public_key = observed_public_keys[-1] if observed_public_keys else None
+        if observed_public_key == seeded_hba_material.public_key_spki:
+            hba_material = seeded_hba_material
+        elif observed_public_key == current_hba_material.public_key_spki or observed_public_key is None:
+            hba_material = current_hba_material
+        else:
+            raise RuntimeError(
+                "Roblox signup used an HBA key that is no longer available in IndexedDB"
+            )
+        log(
+            "Verified browser HBA key",
+            key_changed=(
+                current_hba_material.public_key_spki
+                != seeded_hba_material.public_key_spki
+            ),
+            observed_intents=len(observed_public_keys),
+            observed_key_matches_selected=(
+                observed_public_key is None
+                or observed_public_key == hba_material.public_key_spki
+            ),
+            selected_public_key=secret_summary(hba_material.public_key_spki),
+        )
 
         set_step("session-capture")
         roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')

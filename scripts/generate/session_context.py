@@ -83,6 +83,120 @@ function putKeyPair(db, objectStoreName, keyName, keyPair) {
 });
 """
 
+HBA_REQUEST_OBSERVER_SCRIPT = r"""
+(() => {
+  const storageKey = "roblox_hba_intent_observations";
+
+  function findIntent(value, depth = 0) {
+    if (!value || typeof value !== "object" || depth > 4) return null;
+    const direct = value.secureAuthenticationIntent || value.SecureAuthenticationIntent;
+    if (direct && typeof direct.clientPublicKey === "string") return direct;
+    for (const child of Object.values(value)) {
+      const found = findIntent(child, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function record(url, body) {
+    try {
+      const parsed = typeof body === "string" ? JSON.parse(body) : body;
+      const intent = findIntent(parsed);
+      if (!intent) return;
+      const target = new URL(String(url || ""), window.location.href);
+      const existing = JSON.parse(sessionStorage.getItem(storageKey) || "[]");
+      existing.push({
+        endpoint: `${target.origin}${target.pathname}`,
+        client_public_key: intent.clientPublicKey,
+        timestamp_type: typeof intent.clientEpochTimestamp,
+        signature_length: String(intent.saiSignature || "").length,
+      });
+      sessionStorage.setItem(storageKey, JSON.stringify(existing.slice(-20)));
+    } catch (_) {}
+  }
+
+  if (window.__robloxHbaObserverInstalled) return;
+  window.__robloxHbaObserverInstalled = true;
+
+  const originalOpen = XMLHttpRequest.prototype.open;
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url, ...args) {
+    this.__robloxHbaObservedUrl = url;
+    return originalOpen.call(this, method, url, ...args);
+  };
+  XMLHttpRequest.prototype.send = function(body) {
+    record(this.__robloxHbaObservedUrl, body);
+    return originalSend.call(this, body);
+  };
+
+  const originalFetch = window.fetch;
+  if (typeof originalFetch === "function") {
+    window.fetch = function(input, init = {}) {
+      record(typeof input === "string" ? input : input && input.url, init.body);
+      return originalFetch.call(this, input, init);
+    };
+  }
+})();
+"""
+
+HBA_INSPECTION_SCRIPT = r"""
+const [dbName, objectStoreName, keyName, dbVersion] = arguments;
+const done = arguments[arguments.length - 1];
+
+function base64FromArrayBuffer(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function getKeyPair() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(dbName, dbVersion);
+    request.onerror = () => reject(request.error || new Error("IndexedDB open failed"));
+    request.onsuccess = () => {
+      const db = request.result;
+      try {
+        const tx = db.transaction(objectStoreName, "readonly");
+        const get = tx.objectStore(objectStoreName).get(keyName);
+        get.onsuccess = () => resolve(get.result);
+        get.onerror = () => reject(get.error || new Error("IndexedDB get failed"));
+        tx.oncomplete = () => db.close();
+      } catch (error) {
+        db.close();
+        reject(error);
+      }
+    };
+  });
+}
+
+(async () => {
+  const keyPair = await getKeyPair();
+  if (!keyPair || !keyPair.privateKey || !keyPair.publicKey) {
+    throw new Error("Stored HBA key pair is missing");
+  }
+  const publicKeySpki = await crypto.subtle.exportKey("spki", keyPair.publicKey);
+  const privateKeyJwk = await crypto.subtle.exportKey("jwk", keyPair.privateKey);
+  const publicKeyJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+  let observations = [];
+  try {
+    observations = JSON.parse(sessionStorage.getItem("roblox_hba_intent_observations") || "[]");
+  } catch (_) {}
+  done({
+    ok: true,
+    public_key_spki: base64FromArrayBuffer(publicKeySpki),
+    private_key_jwk: privateKeyJwk,
+    public_key_jwk: publicKeyJwk,
+    observations,
+  });
+})().catch((error) => done({
+  ok: false,
+  error: String(error && error.message ? error.message : error),
+}));
+"""
+
 
 @dataclass
 class HbaMaterial:
@@ -117,3 +231,33 @@ def seed_hba_keypair(driver):
         db_version=int(result["db_version"]),
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
+
+
+def install_hba_request_observer(driver):
+    driver.execute_script(HBA_REQUEST_OBSERVER_SCRIPT)
+
+
+def inspect_hba_keypair(driver, seeded_material):
+    result = driver.execute_async_script(
+        HBA_INSPECTION_SCRIPT,
+        seeded_material.db_name,
+        seeded_material.object_store_name,
+        seeded_material.key_name,
+        seeded_material.db_version,
+    )
+    if not isinstance(result, dict) or not result.get("ok"):
+        error = result.get("error") if isinstance(result, dict) else result
+        raise RuntimeError(f"Failed to inspect browser HBA keypair: {error}")
+
+    current = HbaMaterial(
+        public_key_spki=result["public_key_spki"],
+        private_key_jwk=result["private_key_jwk"],
+        public_key_jwk=result["public_key_jwk"],
+        db_name=seeded_material.db_name,
+        object_store_name=seeded_material.object_store_name,
+        key_name=seeded_material.key_name,
+        db_version=seeded_material.db_version,
+        created_at=seeded_material.created_at,
+    )
+    observations = result.get("observations") or []
+    return current, observations
