@@ -158,6 +158,13 @@ class DiagnosticLoginTests(unittest.TestCase):
             ):
                 firefox.validate_environment()
 
+    def test_generator_uses_the_control_server_web_identity(self):
+        self.assertEqual(
+            firefox.ROBLOX_WEB_USER_AGENT,
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) "
+            "Gecko/20100101 Firefox/153.0",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

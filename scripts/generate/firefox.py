@@ -33,6 +33,10 @@ CREATE_ACCOUNT_URL = "https://www.roblox.com/CreateAccount"
 LOGIN_URL = "https://www.roblox.com/login"
 ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
 MAX_SIGNUP_RELOADS = 5
+ROBLOX_WEB_USER_AGENT = (
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) "
+    "Gecko/20100101 Firefox/153.0"
+)
 
 
 class SignupRetry(RuntimeError):
@@ -785,6 +789,7 @@ def main():
         from undetected_geckodriver import Firefox
         from selenium.webdriver.firefox.options import Options as FxOptions
         opts = FxOptions()
+        opts.set_preference("general.useragent.override", ROBLOX_WEB_USER_AGENT)
         opts.set_preference("permissions.default.camera", 1)
         opts.set_preference("permissions.default.microphone", 1)
         opts.set_preference("media.navigator.permission.disabled", True)
