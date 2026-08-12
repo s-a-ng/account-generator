@@ -14,7 +14,6 @@ from urllib.parse import urlencode, urlparse, urlunparse
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from pymailtm import Account
@@ -34,6 +33,7 @@ CREATE_ACCOUNT_URL = "https://www.roblox.com/CreateAccount"
 LOGIN_URL = "https://www.roblox.com/login"
 ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
 MAX_SIGNUP_RELOADS = 5
+MAX_USERNAME_ATTEMPTS = 25
 ROBLOX_WEB_USER_AGENT = (
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) "
     "Gecko/20100101 Firefox/153.0"
@@ -179,9 +179,7 @@ def save_browser_artifacts(driver, label):
         log("Could not save page source", error=exc)
 
 def report_exception(context, exc, driver=None):
-    message = f"{context} failed during step '{CURRENT_STEP}': {type(exc).__name__}: {exc}"
-    log("ERROR", context=context, step=CURRENT_STEP, error=f"{type(exc).__name__}: {exc}")
-    github_error(message)
+    log("Attempt failed", context=context, step=CURRENT_STEP, error=f"{type(exc).__name__}: {exc}")
     trace = traceback.format_exc()
     print(trace, flush=True)
     try:
@@ -368,36 +366,51 @@ def fill_out_page(driver):
     year_select.select_by_value(year)
     print(f"Selected year: {year}")
 
-    username_input = driver.find_element(By.ID, "signup-username")
-    
-    while True:
-        username = generate_username()
-        username_input.send_keys(username)
-        print(f"Attempting username: {username}")
-        random_sleep()
-        
-        try:
-            success_div = driver.find_element(By.XPATH, "//div[contains(@class, 'has-success') and input[@id='signup-username']]")
-            if success_div:
-                print(f"Username {username} accepted.")
-                break
-        except Exception:
-            pass
-        
-        try:
-            error_div = driver.find_element(By.XPATH, "//div[contains(@class, 'has-error') and input[@id='signup-username']]")
-            if error_div:
-                print(f"Username {username} rejected, trying again.")
-                username_input.send_keys(Keys.CONTROL + "a")
-                username_input.send_keys(Keys.DELETE)
-        except Exception:
-            pass
-    random_sleep()
-
     password_input = driver.find_element(By.ID, "signup-password")
     password_input.send_keys(PASSWORD)
     print("Password entered.")
     random_sleep()
+
+    username_input = driver.find_element(By.ID, "signup-username")
+    signup_button = driver.find_element(By.ID, "signup-button")
+
+    for attempt in range(1, MAX_USERNAME_ATTEMPTS + 1):
+        username = generate_username()
+        username_input.clear()
+        WebDriverWait(driver, 2).until(
+            lambda _driver: username_input.get_attribute("value") == ""
+        )
+        validation = driver.find_element(By.ID, "signup-usernameInputValidation")
+        previous_validation = validation.text.strip()
+        username_input.send_keys(username)
+        print(f"Attempting username: {username} ({attempt}/{MAX_USERNAME_ATTEMPTS})")
+        saw_pending_validation = False
+
+        def username_result(_driver):
+            nonlocal saw_pending_validation
+            if username_input.get_attribute("value") != username:
+                return False
+            if signup_button.is_displayed() and signup_button.is_enabled():
+                return "accepted"
+            current_validation = validation.text.strip()
+            if not current_validation:
+                saw_pending_validation = True
+            elif saw_pending_validation or current_validation != previous_validation:
+                return "rejected"
+            return False
+
+        try:
+            result = WebDriverWait(driver, 10).until(username_result)
+            if result == "accepted":
+                print(f"Username {username} accepted.")
+                break
+            print(f"Username {username} rejected, trying again.")
+        except TimeoutException:
+            print(f"Username {username} validation timed out, trying again.")
+    else:
+        raise SignupRetry(
+            f"Could not find an available username after {MAX_USERNAME_ATTEMPTS} attempts"
+        )
 
     try:
         signup_checkbox = driver.find_element(By.ID, "signup-checkbox")
@@ -406,8 +419,6 @@ def fill_out_page(driver):
             random_sleep()
     except Exception:
         print("Signup checkbox doesnt exist")
-
-    signup_button = driver.find_element(By.ID, "signup-button")
 
     signup_button = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "signup-button")))
     signup_button.click()
@@ -1030,6 +1041,7 @@ def run_loop(generate=None, max_successes=None):
                 successes=successes,
                 error=exc,
             )
+            github_error(f"Roblox session import failed: {exc}")
             raise
         except BrowserSessionRefreshDiagnosticFailed as exc:
             log(
@@ -1037,6 +1049,7 @@ def run_loop(generate=None, max_successes=None):
                 successes=successes,
                 error=exc,
             )
+            github_error(f"Browser session refresh diagnostic failed: {exc}")
             raise
         except Exception as exc:
             if session_refresh_diagnostic_username:
@@ -1045,6 +1058,7 @@ def run_loop(generate=None, max_successes=None):
                     successes=successes,
                     error=exc,
                 )
+                github_error(f"Generator diagnostic failed: {exc}")
                 raise
             failures += 1
             if failures > generator_retry_attempts:
@@ -1054,6 +1068,9 @@ def run_loop(generate=None, max_successes=None):
                     failures=failures,
                     retries=generator_retry_attempts,
                     error=exc,
+                )
+                github_error(
+                    f"Generator exceeded {generator_retry_attempts} retries: {exc}"
                 )
                 raise RuntimeError(f"Exceeded {generator_retry_attempts} generator retries") from exc
             log(
