@@ -32,9 +32,47 @@ CURRENT_STEP = "startup"
 CREATE_ACCOUNT_URL = "https://www.roblox.com/CreateAccount"
 LOGIN_URL = "https://www.roblox.com/login"
 ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
+USERNAME_VALIDATION_URL = "https://auth.roblox.com/v1/usernames/validate"
 MAX_SIGNUP_RELOADS = 5
 MAX_USERNAME_ATTEMPTS = 25
+USERNAME_VALIDATION_TIMEOUT_MS = 3000
 ROBLOX_WEB_USER_AGENT = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
+USERNAME_VALIDATION_SCRIPT = """
+const [url, payload, timeoutMs, done] = arguments;
+const controller = new AbortController();
+const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+async function post(token) {
+    const headers = {"Content-Type": "application/json"};
+    if (token) {
+        headers["X-CSRF-TOKEN"] = token;
+    }
+    return fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+    });
+}
+
+(async () => {
+    let token = window.accountGeneratorXsrfToken;
+    let response = await post(token);
+    if (response.status === 403) {
+        token = response.headers.get("X-CSRF-TOKEN");
+        if (!token) {
+            throw new Error("Roblox did not return an X-CSRF token");
+        }
+        window.accountGeneratorXsrfToken = token;
+        response = await post(token);
+    }
+    const body = await response.json();
+    done({status: response.status, body, error: null});
+})().catch(error => {
+    done({status: 0, body: null, error: error.message || String(error)});
+}).finally(() => clearTimeout(timeout));
+"""
 ADD_EMAIL_BUTTON_XPATH = (
     "//div[contains(@class, 'settings-text-field-container')]"
     "[.//span[text()='Email']]//button[contains(@class, 'foundation-web-button') "
@@ -347,6 +385,25 @@ def is_roblox_request_error_page(driver):
     )
 
 
+def validate_username(driver, username, month, day, year):
+    birthday = f"{year}-{time.strptime(month, '%b').tm_mon:02d}-{day:02d}"
+    result = driver.execute_async_script(
+        USERNAME_VALIDATION_SCRIPT,
+        USERNAME_VALIDATION_URL,
+        {"username": username, "birthday": birthday, "context": "Signup"},
+        USERNAME_VALIDATION_TIMEOUT_MS,
+    )
+    if result["error"] is not None:
+        raise RuntimeError(f"Username validation request failed: {result['error']}")
+    if result["status"] != 200:
+        raise RuntimeError(f"Username validation returned HTTP {result['status']}")
+    code = result["body"]["code"]
+    message = result["body"]["message"]
+    if not isinstance(code, int) or not isinstance(message, str):
+        raise RuntimeError("Username validation returned an invalid response")
+    return code == 0, message
+
+
 def fill_out_page(driver):
     month, day, year = generate_random_birthdate()
     print(f"Generated birthdate: {month} {day}, {year}")
@@ -373,40 +430,13 @@ def fill_out_page(driver):
 
     for attempt in range(1, MAX_USERNAME_ATTEMPTS + 1):
         username = generate_username()
-        username_input.clear()
-        WebDriverWait(driver, 2).until(lambda _driver: username_input.get_attribute("value") == "")
-        validation = driver.find_element(By.ID, "signup-usernameInputValidation")
-        previous_validation = validation.text.strip()
-        username_input.send_keys(username)
         print(f"Attempting username: {username} ({attempt}/{MAX_USERNAME_ATTEMPTS})")
-        saw_pending_validation = False
-
-        def username_result(
-            _driver,
-            expected_username=username,
-            validation_element=validation,
-            previous=previous_validation,
-        ):
-            nonlocal saw_pending_validation
-            if username_input.get_attribute("value") != expected_username:
-                return False
-            if signup_button.is_displayed() and signup_button.is_enabled():
-                return "accepted"
-            current_validation = validation_element.text.strip()
-            if not current_validation:
-                saw_pending_validation = True
-            elif saw_pending_validation or current_validation != previous:
-                return "rejected"
-            return False
-
-        try:
-            result = WebDriverWait(driver, 3).until(username_result)
-            if result == "accepted":
-                print(f"Username {username} accepted.")
-                break
-            print(f"Username {username} rejected, trying again.")
-        except TimeoutException:
-            print(f"Username {username} validation timed out, trying again.")
+        accepted, message = validate_username(driver, username, month, day, year)
+        if accepted:
+            username_input.send_keys(username)
+            print(f"Username {username} accepted.")
+            break
+        print(f"Username {username} rejected: {message}")
     else:
         raise SignupRetry(f"Could not find an available username after {MAX_USERNAME_ATTEMPTS} attempts")
 
