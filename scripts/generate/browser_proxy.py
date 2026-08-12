@@ -12,7 +12,7 @@ def _split_host_port(value, default_port):
         end = host_port.find("]")
         if end != -1:
             host = host_port[1:end]
-            rest = host_port[end + 1:]
+            rest = host_port[end + 1 :]
             return host, int(rest[1:]) if rest.startswith(":") else default_port
 
     if ":" in host_port:
@@ -101,9 +101,13 @@ class _BrowserProxyHandler(socketserver.StreamRequestHandler):
         if parsed.scheme and parsed.netloc:
             target_host = parsed.hostname
             target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            path = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, parsed.fragment))
+            path = urlunparse(
+                ("", "", parsed.path or "/", parsed.params, parsed.query, parsed.fragment)
+            )
         else:
-            host_header = next((line for line in headers if line.lower().startswith(b"host:")), None)
+            host_header = next(
+                (line for line in headers if line.lower().startswith(b"host:")), None
+            )
             if not host_header:
                 return
             host_value = host_header.decode("iso-8859-1").split(":", 1)[1]

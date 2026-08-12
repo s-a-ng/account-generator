@@ -2,7 +2,6 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-
 HBA_SEED_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 
@@ -347,7 +346,7 @@ function refreshObservations() {
 """
 
 
-@dataclass
+@dataclass(frozen=True)
 class HbaMaterial:
     public_key_spki: str
     private_key_jwk: dict
@@ -366,9 +365,8 @@ class HbaMaterial:
 
 def seed_hba_keypair(driver):
     result = driver.execute_async_script(HBA_SEED_SCRIPT)
-    if not isinstance(result, dict) or not result.get("ok"):
-        error = result.get("error") if isinstance(result, dict) else result
-        raise RuntimeError(f"Failed to seed HBA keypair: {error}")
+    if not result["ok"]:
+        raise RuntimeError(f"Failed to seed HBA keypair: {result['error']}")
 
     return HbaMaterial(
         public_key_spki=result["public_key_spki"],
@@ -394,9 +392,8 @@ def inspect_hba_keypair(driver, seeded_material):
         seeded_material.key_name,
         seeded_material.db_version,
     )
-    if not isinstance(result, dict) or not result.get("ok"):
-        error = result.get("error") if isinstance(result, dict) else result
-        raise RuntimeError(f"Failed to inspect browser HBA keypair: {error}")
+    if not result["ok"]:
+        raise RuntimeError(f"Failed to inspect browser HBA keypair: {result['error']}")
 
     current = HbaMaterial(
         public_key_spki=result["public_key_spki"],
@@ -408,12 +405,8 @@ def inspect_hba_keypair(driver, seeded_material):
         db_version=seeded_material.db_version,
         created_at=seeded_material.created_at,
     )
-    observations = result.get("observations") or []
-    return current, observations
+    return current, result["observations"]
 
 
 def browser_refresh_session(driver):
-    result = driver.execute_async_script(BROWSER_SESSION_REFRESH_SCRIPT)
-    if not isinstance(result, dict):
-        raise RuntimeError(f"Browser session refresh returned invalid data: {result}")
-    return result
+    return driver.execute_async_script(BROWSER_SESSION_REFRESH_SCRIPT)

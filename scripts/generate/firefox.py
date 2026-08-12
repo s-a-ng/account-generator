@@ -1,31 +1,31 @@
-
-import os
-import hashlib
 import getpass
-import requests
-import re
+import hashlib
+import os
 import random
+import re
 import string
 import time
 import traceback
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
-from selenium.common.exceptions import TimeoutException
+import requests
+from ageverify import AgeVerificationConfig, verify_age
+from browser_proxy import BrowserProxyBridge, configure_firefox_proxy
+from pymailtm import Account
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
-from pymailtm import Account
-from ageverify import AgeVerificationConfig, verify_age
-from browser_proxy import BrowserProxyBridge, configure_firefox_proxy
-from username_generator import generate_username
 from session_context import (
     browser_refresh_session,
     inspect_hba_keypair,
     install_hba_request_observer,
     seed_hba_keypair,
 )
+from username_generator import generate_username
 
 ARTIFACT_DIR = Path(os.getenv("GENERATOR_ARTIFACT_DIR", "artifacts/generator"))
 CURRENT_STEP = "startup"
@@ -35,54 +35,69 @@ ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
 MAX_SIGNUP_RELOADS = 5
 MAX_USERNAME_ATTEMPTS = 25
 ROBLOX_WEB_USER_AGENT = (
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) "
-    "Gecko/20100101 Firefox/153.0"
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
+)
+ADD_EMAIL_BUTTON_XPATH = (
+    "//div[contains(@class, 'settings-text-field-container')]"
+    "[.//span[text()='Email']]//button[contains(@class, 'foundation-web-button') "
+    "and .//span[normalize-space()='Add']]"
+)
+SUBMIT_EMAIL_BUTTON_XPATH = (
+    "//button[@class='modal-full-width-button btn-primary-md btn-min-width' and text()='Add Email']"
 )
 
 
 class SignupRetry(RuntimeError):
     pass
 
+
 class CaptchaDetected(RuntimeError):
     pass
+
 
 class SessionImportFailed(RuntimeError):
     pass
 
+
 class BrowserSessionRefreshDiagnosticFailed(RuntimeError):
     pass
+
 
 def utc_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+
 def safe_field(value):
-    text = str(value)
-    return text.replace("\n", "\\n").replace("\r", "\\r")
+    return str(value).replace("\n", "\\n").replace("\r", "\\r")
+
 
 def log(message, **fields):
-    suffix = ""
-    if fields:
-        suffix = " " + " ".join(f"{key}={safe_field(value)}" for key, value in fields.items())
+    suffix = " ".join(f"{key}={safe_field(value)}" for key, value in fields.items())
+    suffix = f" {suffix}" if suffix else ""
     print(f"[{utc_timestamp()}] {message}{suffix}", flush=True)
+
 
 def set_step(name):
     global CURRENT_STEP
     CURRENT_STEP = name
     log("STEP", name=name)
 
+
 def github_escape(value):
-    text = str(value)
-    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return str(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
 
 def github_error(message):
     if os.getenv("GITHUB_ACTIONS"):
         print(f"::error::{github_escape(message)}", flush=True)
+
 
 def secret_summary(value):
     if not value:
         return "<missing>"
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
     return f"<set len={len(value)} sha256={digest}>"
+
 
 def proxy_summary(value):
     text = str(value or "")
@@ -93,10 +108,11 @@ def proxy_summary(value):
     return {
         "present": True,
         "scheme": parsed.scheme or None,
-        "host_sha256": hashlib.sha256(host.encode("utf-8")).hexdigest()[:10] if host else None,
+        "host_sha256": (hashlib.sha256(host.encode("utf-8")).hexdigest()[:10] if host else None),
         "port": parsed.port,
         "has_auth": bool(parsed.username or parsed.password),
     }
+
 
 def redacted_url(url):
     if not url:
@@ -105,8 +121,9 @@ def redacted_url(url):
         parsed = urlparse(url)
         query = "<redacted>" if parsed.query else ""
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, ""))
-    except Exception:
+    except ValueError:
         return "<unparseable-url>"
+
 
 def env_float(name, default):
     raw = os.getenv(name, str(default)).strip()
@@ -118,25 +135,17 @@ def env_float(name, default):
         raise RuntimeError(f"{name} must be greater than zero")
     return value
 
-def env_int(name, default):
+
+def env_int(name, default, minimum=1):
     raw = os.getenv(name, str(default)).strip()
     try:
         value = int(raw)
     except ValueError as exc:
         raise RuntimeError(f"{name} must be an integer") from exc
-    if value <= 0:
-        raise RuntimeError(f"{name} must be greater than zero")
+    if value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}")
     return value
 
-def env_nonnegative_int(name, default):
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer") from exc
-    if value < 0:
-        raise RuntimeError(f"{name} must be zero or greater")
-    return value
 
 def env_bool(name, default):
     raw = os.getenv(name, str(default)).strip().lower()
@@ -144,9 +153,8 @@ def env_bool(name, default):
         return True
     if raw in {"0", "false", "no", "off"}:
         return False
-    raise RuntimeError(
-        f"{name} must be one of: 1, 0, true, false, yes, no, on, off"
-    )
+    raise RuntimeError(f"{name} must be one of: 1, 0, true, false, yes, no, on, off")
+
 
 def artifact_path(label, suffix):
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -154,121 +162,105 @@ def artifact_path(label, suffix):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return ARTIFACT_DIR / f"{stamp}-{safe_label}.{suffix}"
 
+
 def write_artifact(label, suffix, content):
     path = artifact_path(label, suffix)
     path.write_text(content, encoding="utf-8", errors="replace")
     log("Saved artifact", path=path)
     return path
 
+
 def save_browser_artifacts(driver, label):
     if driver is None:
         return
     try:
-        log("Browser state", url=redacted_url(driver.current_url), title=getattr(driver, "title", "<unknown>"))
-    except Exception as exc:
+        log(
+            "Browser state",
+            url=redacted_url(driver.current_url),
+            title=driver.title,
+        )
+    except WebDriverException as exc:
         log("Could not read browser state", error=exc)
     try:
         screenshot = artifact_path(label, "png")
         driver.save_screenshot(str(screenshot))
         log("Saved browser screenshot", path=screenshot)
-    except Exception as exc:
+    except (OSError, WebDriverException) as exc:
         log("Could not save browser screenshot", error=exc)
     try:
         write_artifact(f"{label}-page", "html", driver.page_source or "")
-    except Exception as exc:
+    except (OSError, WebDriverException) as exc:
         log("Could not save page source", error=exc)
 
+
 def report_exception(context, exc, driver=None):
-    log("Attempt failed", context=context, step=CURRENT_STEP, error=f"{type(exc).__name__}: {exc}")
+    log(
+        "Attempt failed",
+        context=context,
+        step=CURRENT_STEP,
+        error=f"{type(exc).__name__}: {exc}",
+    )
     trace = traceback.format_exc()
     print(trace, flush=True)
-    try:
+    with suppress(OSError):
         write_artifact(f"{context}-traceback", "txt", trace)
-    except Exception:
-        pass
     save_browser_artifacts(driver, f"{context}-{CURRENT_STEP}")
 
-def generateUsername():
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
 
-def generateEmail(password):
-    maxRetries = 3
-    for attempt in range(maxRetries):
+def mail_username():
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+
+
+def generate_email(password):
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
         try:
-            log("Fetching mail.tm domains", attempt=f"{attempt + 1}/{maxRetries}")
+            log("Fetching mail.tm domains", attempt=f"{attempt}/{max_attempts}")
             domain_response = requests.get("https://api.mail.tm/domains", timeout=10)
             domain_response.raise_for_status()
-            domains = domain_response.json().get('hydra:member', [])
-            
+            domains = domain_response.json()["hydra:member"]
             if not domains:
-                raise Exception("No domains available")
+                raise RuntimeError("mail.tm returned no domains")
 
-            domain = random.choice(domains)['domain']
-            username = generateUsername()
-            address = f"{username}@{domain}"
+            address = f"{mail_username()}@{random.choice(domains)['domain']}"
 
             account_response = requests.post(
-                "https://api.mail.tm/accounts", 
-                json={"address": address, "password": password}, 
-                timeout=10
+                "https://api.mail.tm/accounts",
+                json={"address": address, "password": password},
+                timeout=10,
             )
-            
-            if account_response.status_code == 201:
-                account_data = account_response.json()
-                log("Created mail.tm account", address=address, account_id=account_data.get("id"))
-                
-                token_response = requests.post(
-                    "https://api.mail.tm/token",
-                    json={"address": address, "password": password},
-                    timeout=10
-                )
-                
-                if token_response.status_code == 200:
-                    token = token_response.json().get("token")
-                    if token:
-                        return address, password, token, account_data['id']
-                log(
-                    "mail.tm token request failed",
-                    status=token_response.status_code,
-                    body=token_response.text[:500],
-                )
-            else:
-                log(
-                    "mail.tm account create failed",
-                    status=account_response.status_code,
-                    body=account_response.text[:500],
-                )
-            
-            if attempt < maxRetries - 1:
-                time.sleep(2)
-                
-        except Exception as e:
-            log("Error creating email", error=e, attempt=f"{attempt + 1}/{maxRetries}")
-            if attempt < maxRetries - 1:
+            account_response.raise_for_status()
+            account = account_response.json()
+            log("Created mail.tm account", address=address, account_id=account["id"])
+            return address, password, account["id"]
+        except requests.RequestException as error:
+            log("mail.tm request failed", error=error, attempt=f"{attempt}/{max_attempts}")
+            if attempt < max_attempts:
                 time.sleep(2)
 
-    raise RuntimeError(f"Failed to create email after {maxRetries} attempts")
+    raise RuntimeError(f"Failed to create email after {max_attempts} attempts")
 
 
 try:
     os.getlogin()
 except OSError:
-    def getlogin_monkey_patch():
-        return getpass.getuser()
-
-    os.getlogin = getlogin_monkey_patch
-
+    os.getlogin = getpass.getuser
 
 
 def generate_random_birthdate():
-    month = random.choice(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
-    day = random.choice(range(1, 27))
+    month = random.choice(
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    )
+    day = random.randint(1, 26)
     year = str(random.randint(1995, 2002))
     return month, day, year
 
+
 PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
-upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/internal/roblox-sessions/import")
+upload_url = os.getenv(
+    "UPLOAD_URL", "https://command.botted.org/api/internal/roblox-sessions/import"
+)
 upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip() or "default"
 upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -277,7 +269,7 @@ upload_import_timeout_seconds = env_float("UPLOAD_IMPORT_TIMEOUT_SECONDS", 90)
 upload_import_poll_seconds = env_float("UPLOAD_IMPORT_POLL_SECONDS", 2)
 roblox_page_retry_attempts = env_int("ROBLOX_PAGE_RETRY_ATTEMPTS", 5)
 generator_retry_attempts = env_int("GENERATOR_RETRY_ATTEMPTS", 5)
-generator_max_successes = env_nonnegative_int("GENERATOR_MAX_SUCCESSES", 0)
+generator_max_successes = env_int("GENERATOR_MAX_SUCCESSES", 0, minimum=0)
 age_verification_enabled = env_bool("AGE_VERIFICATION_ENABLED", True)
 browser_session_refresh_diagnostic = env_bool("BROWSER_SESSION_REFRESH_DIAGNOSTIC", False)
 session_refresh_diagnostic_username = os.getenv("SESSION_REFRESH_DIAGNOSTIC_USERNAME", "").strip()
@@ -285,18 +277,19 @@ selenium_proxy_enabled = env_bool("SELENIUM_PROXY_ENABLED", False)
 
 hba_material = None
 
+
 def validate_environment():
-    missing = []
     if not PASSWORD:
-        missing.append("PASSWORD")
+        raise RuntimeError("PASSWORD is required")
     if not upload_key:
-        missing.append("UPLOAD_KEY")
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+        raise RuntimeError("UPLOAD_KEY is required")
     if len(upload_division) > 64:
         raise RuntimeError("ROBLOX_SESSION_INGEST_DIVISION must be 64 characters or fewer")
     if upload_pool == "project" or not POOL_NAME_PATTERN.match(upload_pool):
-        raise RuntimeError("ROBLOX_SESSION_INGEST_POOL must use lowercase letters, numbers, underscores, or hyphens")
+        raise RuntimeError(
+            "ROBLOX_SESSION_INGEST_POOL must use lowercase letters, numbers, "
+            "underscores, or hyphens"
+        )
     if session_refresh_diagnostic_username and not browser_session_refresh_diagnostic:
         raise RuntimeError(
             "SESSION_REFRESH_DIAGNOSTIC_USERNAME requires BROWSER_SESSION_REFRESH_DIAGNOSTIC"
@@ -336,19 +329,18 @@ def validate_environment():
         artifacts=ARTIFACT_DIR,
     )
 
-def random_sleep(min = 0.3, max = 0.8):
-    time.sleep(random.uniform(min, max))
+
+def random_sleep(lower=0.3, upper=0.8):
+    time.sleep(random.uniform(lower, upper))
+
 
 def is_roblox_request_error_page(driver):
-    try:
-        current_url = driver.current_url or ""
-        page_source = (driver.page_source or "").lower()
-    except Exception:
-        return False
-    return (
-        "request-error" in current_url
-        or ("something went wrong" in page_source and "unexpected error occurred" in page_source)
+    current_url = driver.current_url or ""
+    page_source = (driver.page_source or "").lower()
+    return "request-error" in current_url or (
+        "something went wrong" in page_source and "unexpected error occurred" in page_source
     )
+
 
 def fill_out_page(driver):
     month, day, year = generate_random_birthdate()
@@ -377,25 +369,28 @@ def fill_out_page(driver):
     for attempt in range(1, MAX_USERNAME_ATTEMPTS + 1):
         username = generate_username()
         username_input.clear()
-        WebDriverWait(driver, 2).until(
-            lambda _driver: username_input.get_attribute("value") == ""
-        )
+        WebDriverWait(driver, 2).until(lambda _driver: username_input.get_attribute("value") == "")
         validation = driver.find_element(By.ID, "signup-usernameInputValidation")
         previous_validation = validation.text.strip()
         username_input.send_keys(username)
         print(f"Attempting username: {username} ({attempt}/{MAX_USERNAME_ATTEMPTS})")
         saw_pending_validation = False
 
-        def username_result(_driver):
+        def username_result(
+            _driver,
+            expected_username=username,
+            validation_element=validation,
+            previous=previous_validation,
+        ):
             nonlocal saw_pending_validation
-            if username_input.get_attribute("value") != username:
+            if username_input.get_attribute("value") != expected_username:
                 return False
             if signup_button.is_displayed() and signup_button.is_enabled():
                 return "accepted"
-            current_validation = validation.text.strip()
+            current_validation = validation_element.text.strip()
             if not current_validation:
                 saw_pending_validation = True
-            elif saw_pending_validation or current_validation != previous_validation:
+            elif saw_pending_validation or current_validation != previous:
                 return "rejected"
             return False
 
@@ -412,41 +407,40 @@ def fill_out_page(driver):
             f"Could not find an available username after {MAX_USERNAME_ATTEMPTS} attempts"
         )
 
-    try:
-        signup_checkbox = driver.find_element(By.ID, "signup-checkbox")
-        if signup_checkbox:
-            signup_checkbox.click()
-            random_sleep()
-    except Exception:
-        print("Signup checkbox doesnt exist")
+    checkboxes = driver.find_elements(By.ID, "signup-checkbox")
+    if checkboxes:
+        checkboxes[0].click()
+        random_sleep()
 
-    signup_button = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "signup-button")))
+    signup_button = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.ID, "signup-button"))
+    )
     signup_button.click()
     random_sleep()
 
     print("Signup button clicked.")
 
-def poll_email(email, emailPassword, emailID):
-    print(f"Polling email for {email}...")
-    emailCheckAttempts = 0
-    maxEmailAttempts = 300
-    account = Account(emailID, email, emailPassword)
 
-    while emailCheckAttempts < maxEmailAttempts:
-        print(f"Email poll attempt {emailCheckAttempts + 1}/{maxEmailAttempts}")
+def poll_email(email, password, account_id):
+    print(f"Polling email for {email}...")
+    max_attempts = 300
+    account = Account(account_id, email, password)
+
+    for attempt in range(1, max_attempts + 1):
+        print(f"Email poll attempt {attempt}/{max_attempts}")
         try:
             messages = account.get_messages()
-            if len(messages) > 0:
+            if messages:
                 print(f"Found {len(messages)} messages.")
                 return messages
-        except Exception as e:
-            print(f"Error checking email: {e}")
-
-        emailCheckAttempts += 1
+        except Exception as error:  # noqa: BLE001
+            # pymailtm exposes no public exception type for transient polling failures.
+            print(f"Error checking email: {error}")
         time.sleep(5)
 
     print("Email polling timed out.")
-    return False
+    return []
+
 
 def link_email(driver, email):
     print("Linking email...")
@@ -461,12 +455,15 @@ def link_email(driver, email):
         wait = WebDriverWait(driver, 30)
 
         if is_roblox_request_error_page(driver):
-            log("Roblox account settings returned request error; reloading", attempt=attempt)
+            log(
+                "Roblox account settings returned request error; reloading",
+                attempt=attempt,
+            )
             random_sleep(1.5, 3.0)
             continue
 
         try:
-            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'settings-text-field-container')][.//span[text()='Email']]//button[contains(@class, 'foundation-web-button') and .//span[normalize-space()='Add']]")))
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, ADD_EMAIL_BUTTON_XPATH)))
             btn.click()
             print("Clicked Add button.")
             email_input = wait.until(EC.presence_of_element_located((By.ID, "emailAddress")))
@@ -474,7 +471,9 @@ def link_email(driver, email):
             print(f"Entered email into modal: {email}")
             random_sleep()
 
-            add_email_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='modal-full-width-button btn-primary-md btn-min-width' and text()='Add Email']")))
+            add_email_btn = wait.until(
+                EC.element_to_be_clickable((By.XPATH, SUBMIT_EMAIL_BUTTON_XPATH))
+            )
             add_email_btn.click()
             print("Clicked Add Email button")
             random_sleep()
@@ -482,68 +481,69 @@ def link_email(driver, email):
         except TimeoutException as exc:
             last_error = exc
             if is_roblox_request_error_page(driver):
-                log("Roblox account settings became request error; reloading", attempt=attempt)
+                log(
+                    "Roblox account settings became request error; reloading",
+                    attempt=attempt,
+                )
                 random_sleep(1.5, 3.0)
                 continue
             raise
 
-    raise RuntimeError(f"Failed to load Roblox account settings after {roblox_page_retry_attempts} attempts") from last_error
+    raise RuntimeError(
+        f"Failed to load Roblox account settings after {roblox_page_retry_attempts} attempts"
+    ) from last_error
 
 
 def verify_email_address(driver):
-    email, emailPassword, token, emailID = generateEmail(PASSWORD)
+    email, password, account_id = generate_email(PASSWORD)
     print(f"Generated email: {email}")
 
     link_email(driver, email)
-    
 
-    messages = poll_email(email, emailPassword, emailID)
-    if messages:
-        msg = messages[0]
-        body = getattr(msg, 'text', None)
+    messages = poll_email(email, password, account_id)
+    if not messages:
+        return False
 
-        if not body and hasattr(msg, 'html') and msg.html and len(msg.html) > 0:
-            body = msg.html[0]
+    message = messages[0]
+    body = message.text or (message.html[0] if message.html else "")
+    if not body:
+        print("No email body found.")
+        return False
 
-        if body:
-            print("Email body found.")
-            match = re.search(r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+', body)
-            if match:
-                link = match.group(0)
-                log("Verification link found", url=redacted_url(link))
-                driver.get(link)
-                return True
-            else:
-                print("No verification link found in email body.")
-        else:
-            print("No email body found.")
+    match = re.search(
+        r'https://www\.roblox\.com/account/settings/verify-email\?ticket=[^\s)"]+',
+        body,
+    )
+    if not match:
+        print("No verification link found in email body.")
+        return False
 
-    return False
+    link = match.group(0)
+    log("Verification link found", url=redacted_url(link))
+    driver.get(link)
+    return True
 
 
 def poll_for_captcha(driver, timeout_seconds=120):
     started = time.time()
-    while True: 
-        if "https://www.roblox.com/home" in driver.current_url: 
-            break
+    while "https://www.roblox.com/home" not in driver.current_url:
         if time.time() - started > timeout_seconds:
             raise SignupRetry(f"Timed out waiting for signup completion after {timeout_seconds}s")
 
-        try:
-            driver.find_element(By.CSS_SELECTOR, 'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]')
+        if driver.find_elements(
+            By.CSS_SELECTOR,
+            'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]',
+        ):
             raise CaptchaDetected("Detected Roblox captcha during signup")
-        except Exception as exc:
-            if isinstance(exc, RuntimeError):
-                raise
 
-        try:
-            driver.find_element(By.CSS_SELECTOR, 'div#GeneralErrorText[role="button"][aria-label="dismiss general error"]')
+        if driver.find_elements(
+            By.CSS_SELECTOR,
+            'div#GeneralErrorText[role="button"][aria-label="dismiss general error"]',
+        ):
             raise SignupRetry("Detected Roblox general signup error")
-        except Exception as exc:
-            if isinstance(exc, RuntimeError):
-                raise
 
         time.sleep(0.5)
+
 
 def response_body_preview(response, max_chars=2000):
     text = response.text or ""
@@ -551,6 +551,7 @@ def response_body_preview(response, max_chars=2000):
     if len(text) > max_chars:
         return text[:max_chars] + "...<truncated>"
     return text
+
 
 def parse_upload_payload(response):
     try:
@@ -562,9 +563,11 @@ def parse_upload_payload(response):
             f"body={response_body_preview(response)}"
         ) from exc
 
+
 def control_endpoint(path):
     parsed = urlparse(upload_url)
     return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
 
 def acquire_import_proxy():
     response = requests.post(
@@ -574,14 +577,15 @@ def acquire_import_proxy():
         timeout=upload_enqueue_timeout_seconds,
     )
     payload = parse_upload_payload(response)
-    proxy = payload.get("proxy")
-    if response.status_code != 200 or not proxy:
+    if response.status_code != 200:
         raise RuntimeError(
             f"Failed to acquire Selenium proxy: status={response.status_code} "
             f"body={response_body_preview(response)}"
         )
+    proxy = payload["proxy"]
     log("Acquired Selenium proxy", proxy=proxy_summary(proxy))
     return proxy
+
 
 def preflight_import_proxy(proxy):
     response = requests.get(
@@ -599,45 +603,12 @@ def preflight_import_proxy(proxy):
     if response.status_code >= 500:
         raise RuntimeError(f"Selenium proxy preflight failed with status {response.status_code}")
 
-def import_status_url(job):
-    job_id = job.get("id")
-    status_url = job.get("status_url")
-
-    if status_url:
-        parsed = urlparse(status_url)
-        upload_parsed = urlparse(upload_url)
-        if parsed.netloc and upload_parsed.netloc and parsed.netloc == upload_parsed.netloc:
-            return urlunparse((
-                upload_parsed.scheme or parsed.scheme,
-                parsed.netloc,
-                parsed.path,
-                parsed.params,
-                parsed.query,
-                parsed.fragment,
-            ))
-        return status_url
-
-    if not job_id:
-        return None
-
-    upload_parsed = urlparse(upload_url)
-    return urlunparse((
-        upload_parsed.scheme,
-        upload_parsed.netloc,
-        "/api/internal/roblox-sessions/import-status",
-        "",
-        urlencode({"job_id": job_id}),
-        "",
-    ))
 
 def poll_upload_import(job):
-    status_url = import_status_url(job)
-    job_id = job.get("id") or "<unknown>"
-    if not status_url:
-        raise RuntimeError("Upload queued but no import status URL or job id was returned")
-
+    job_id = job["id"]
+    status_url = job["status_url"]
     headers = {"x-session-ingest-key": upload_key}
-    deadline = time.time() + upload_import_timeout_seconds
+    deadline = time.monotonic() + upload_import_timeout_seconds
     last_status = None
 
     while True:
@@ -654,20 +625,19 @@ def poll_upload_import(job):
                 f"body={response_body_preview(response)}"
             )
 
-        current_job = payload.get("job") or {}
-        status = current_job.get("status") or "<unknown>"
+        current_job = payload["job"]
+        status = current_job["status"]
         if status != last_status:
-            error = payload.get("error") or current_job.get("error") or {}
-            session = payload.get("session") or current_job.get("session") or {}
+            error = payload["error"] or current_job["error"]
+            session = payload["session"] or current_job["session"]
             log(
                 "Roblox session import status",
                 job_id=job_id,
                 status=status,
-                error_code=error.get("code") or None,
-                error_message=error.get("message") or None,
-                error_details=error.get("details") or None,
-                session_id=session.get("session_id") or None,
-                username=session.get("username") or None,
+                error_code=error["code"] if error else None,
+                error_message=error["message"] if error else None,
+                session_id=session["session_id"] if session else None,
+                username=session["username"] if session else None,
             )
             last_status = status
 
@@ -675,20 +645,18 @@ def poll_upload_import(job):
             return payload
 
         if status == "failed":
-            error = payload.get("error") or current_job.get("error") or {}
+            error = payload["error"] or current_job["error"]
             raise RuntimeError(
-                "Roblox session import failed: "
-                f"code={error.get('code') or '<unknown>'} "
-                f"message={error.get('message') or '<missing>'}"
+                f"Roblox session import failed: code={error['code']} message={error['message']}"
             )
 
-        if time.time() >= deadline:
+        if time.monotonic() >= deadline:
             raise RuntimeError(
-                f"Timed out waiting for Roblox session import job {job_id}; "
-                f"last_status={status}"
+                f"Timed out waiting for Roblox session import job {job_id}; last_status={status}"
             )
 
         time.sleep(upload_import_poll_seconds)
+
 
 def upload_session_cookie(cookie, proxy=None):
     if not hba_material:
@@ -719,26 +687,27 @@ def upload_session_cookie(cookie, proxy=None):
     )
 
     payload = parse_upload_payload(response)
-    if response.status_code == 202:
-        job = dict(payload.get("job") or {})
-        status_url = job.get("status_url") or response.headers.get("location")
-        if status_url:
-            job["status_url"] = status_url
-        log(
-            "Roblox session import queued",
-            job_id=job.get("id") or "<unknown>",
-            status=job.get("status") or "<unknown>",
-            status_url=status_url or "<missing>",
+    if response.status_code != 202:
+        raise RuntimeError(
+            f"Failed to queue session import: status={response.status_code} "
+            f"body={response_body_preview(response)}"
         )
-        return poll_upload_import(job)
 
-    if 200 <= response.status_code < 300:
-        return payload
-
-    raise RuntimeError(
-        f"Failed to upload cookie: status={response.status_code} "
-        f"body={response_body_preview(response)}"
+    job = payload["job"]
+    log(
+        "Roblox session import queued",
+        job_id=job["id"],
+        status=job["status"],
+        status_url=job["status_url"],
     )
+    return poll_upload_import(job)
+
+
+def roblosecurity_cookie(driver, context):
+    cookie = driver.get_cookie(".ROBLOSECURITY")
+    if cookie is None or not cookie["value"]:
+        raise RuntimeError(f".ROBLOSECURITY cookie was not found {context}")
+    return cookie["value"]
 
 
 def create_account(driver):
@@ -747,7 +716,7 @@ def create_account(driver):
     if not PASSWORD:
         raise RuntimeError("PASSWORD is required to create an account")
 
-    for signup_reload in range(0, MAX_SIGNUP_RELOADS + 1):
+    for signup_reload in range(MAX_SIGNUP_RELOADS + 1):
         set_step("open-signup")
         driver.get(CREATE_ACCOUNT_URL)
         log(
@@ -778,9 +747,7 @@ def create_account(driver):
             break
         except SignupRetry as exc:
             if signup_reload >= MAX_SIGNUP_RELOADS:
-                raise RuntimeError(
-                    f"Exceeded {MAX_SIGNUP_RELOADS} signup page reloads"
-                ) from exc
+                raise RuntimeError(f"Exceeded {MAX_SIGNUP_RELOADS} signup page reloads") from exc
             log(
                 "Reloading signup page after retryable signup failure",
                 reload=f"{signup_reload + 1}/{MAX_SIGNUP_RELOADS}",
@@ -788,16 +755,9 @@ def create_account(driver):
             )
             random_sleep(1.5, 3.0)
 
-    roblosecurity_cookie = driver.get_cookie(".ROBLOSECURITY")
-    if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
-        raise RuntimeError(
-            ".ROBLOSECURITY cookie was not found after account creation"
-        )
-    log(
-        "Account session created",
-        cookie=secret_summary(roblosecurity_cookie["value"]),
-    )
-    return roblosecurity_cookie["value"]
+    cookie = roblosecurity_cookie(driver, "after account creation")
+    log("Account session created", cookie=secret_summary(cookie))
+    return cookie
 
 
 def login_diagnostic_account(driver, username):
@@ -826,176 +786,169 @@ def login_diagnostic_account(driver, username):
     password_input.send_keys(PASSWORD)
     wait.until(EC.element_to_be_clickable((By.ID, "login-button"))).click()
 
-    deadline = time.time() + 30
-    while time.time() < deadline:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         cookie = driver.get_cookie(".ROBLOSECURITY")
-        if cookie and cookie.get("value"):
+        if cookie is not None and cookie["value"]:
             log("Diagnostic account login succeeded", username=username)
             return cookie["value"]
-        try:
-            driver.find_element(
-                By.CSS_SELECTOR,
-                'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]',
-            )
+        if driver.find_elements(
+            By.CSS_SELECTOR,
+            'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]',
+        ):
             raise CaptchaDetected("Detected Roblox captcha during diagnostic login")
-        except CaptchaDetected:
-            raise
-        except Exception:
-            pass
         time.sleep(0.5)
 
     raise RuntimeError("Timed out waiting for diagnostic account login")
 
 
+def start_proxy():
+    if not selenium_proxy_enabled:
+        return None, None
+
+    set_step("acquire-selenium-proxy")
+    proxy = acquire_import_proxy()
+    preflight_import_proxy(proxy)
+    bridge = BrowserProxyBridge(proxy, upload_enqueue_timeout_seconds)
+    log("Started local Selenium proxy bridge")
+    return proxy, bridge
+
+
+def start_browser(proxy_bridge):
+    from selenium.webdriver.firefox.options import Options as FxOptions
+    from undetected_geckodriver import Firefox
+
+    set_step("browser-start-firefox")
+    options = FxOptions()
+    options.set_preference("general.useragent.override", ROBLOX_WEB_USER_AGENT)
+    options.set_preference("permissions.default.camera", 1)
+    options.set_preference("permissions.default.microphone", 1)
+    options.set_preference("media.navigator.permission.disabled", True)
+    options.set_preference("media.getusermedia.insecure.enabled", True)
+    if proxy_bridge is not None:
+        configure_firefox_proxy(options, proxy_bridge.url)
+    driver = Firefox(options=options)
+    log("Browser initialized")
+    return driver
+
+
+def prepare_account(driver):
+    if session_refresh_diagnostic_username:
+        login_diagnostic_account(driver, session_refresh_diagnostic_username)
+        return
+
+    create_account(driver)
+    set_step("email-verification")
+    print(
+        "Email verified." if verify_email_address(driver) else "Email verification failed.",
+        flush=True,
+    )
+
+    if age_verification_enabled:
+        set_step("age-verification")
+        verify_age(
+            driver,
+            roblosecurity_cookie(driver, "before age verification"),
+            config=AgeVerificationConfig.from_environment(),
+            logger=log,
+        )
+
+
+def select_hba_material(driver):
+    global hba_material
+
+    set_step("verify-hba")
+    seeded = hba_material
+    current, observations = inspect_hba_keypair(driver, seeded)
+    observed_keys = [
+        observation["client_public_key"]
+        for observation in observations
+        if "client_public_key" in observation
+    ]
+    observed = observed_keys[-1] if observed_keys else None
+
+    if observed == seeded.public_key_spki:
+        selected = seeded
+    elif observed is None or observed == current.public_key_spki:
+        selected = current
+    else:
+        raise RuntimeError("Roblox signup used an HBA key that is no longer available in IndexedDB")
+
+    hba_material = selected
+    log(
+        "Verified browser HBA key",
+        key_changed=current.public_key_spki != seeded.public_key_spki,
+        observed_intents=len(observed_keys),
+        observed_key_matches_selected=(observed is None or observed == selected.public_key_spki),
+        selected_public_key=secret_summary(selected.public_key_spki),
+    )
+
+
+def run_session_refresh_diagnostic(driver):
+    if not browser_session_refresh_diagnostic:
+        return
+
+    set_step("browser-session-refresh-diagnostic")
+    try:
+        result = browser_refresh_session(driver)
+    except Exception as error:
+        raise BrowserSessionRefreshDiagnosticFailed(
+            f"Browser session refresh diagnostic did not complete: {error}"
+        ) from error
+    log("Browser session refresh diagnostic", **result)
+    if not result["ok"]:
+        raise BrowserSessionRefreshDiagnosticFailed(
+            f"Browser session refresh diagnostic was rejected: {result}"
+        )
+
+
+def upload_browser_session(driver, proxy):
+    set_step("session-capture")
+    cookie = roblosecurity_cookie(driver, "in the browser session")
+
+    set_step("session-upload")
+    log(
+        "Uploading Roblox session",
+        upload_url=upload_url,
+        ingest_division=upload_division,
+        ingest_pool=upload_pool,
+        cookie=secret_summary(cookie),
+        hba_material=bool(hba_material),
+        selenium_proxy=proxy_summary(proxy),
+    )
+
+    try:
+        payload = upload_session_cookie(cookie, proxy)
+    except Exception as error:
+        raise SessionImportFailed(f"Roblox session import failed: {error}") from error
+
+    session = payload["session"]
+    print(
+        "Cookie uploaded successfully.",
+        f"session_id={session['session_id']}",
+        f"username={session['username']}",
+        f"status={session['status']}",
+        flush=True,
+    )
+
+
 def main():
     global hba_material
+
     driver = None
-    browser_proxy_bridge = None
-    import_proxy = None
+    proxy = None
+    proxy_bridge = None
     hba_material = None
 
     try:
         set_step("validate-environment")
         validate_environment()
-        if selenium_proxy_enabled:
-            set_step("acquire-selenium-proxy")
-            import_proxy = acquire_import_proxy()
-            preflight_import_proxy(import_proxy)
-            browser_proxy_bridge = BrowserProxyBridge(
-                import_proxy,
-                upload_enqueue_timeout_seconds,
-            )
-            log("Started local Selenium proxy bridge")
-        set_step("browser-start-firefox")
-        from undetected_geckodriver import Firefox
-        from selenium.webdriver.firefox.options import Options as FxOptions
-        opts = FxOptions()
-        opts.set_preference("general.useragent.override", ROBLOX_WEB_USER_AGENT)
-        opts.set_preference("permissions.default.camera", 1)
-        opts.set_preference("permissions.default.microphone", 1)
-        opts.set_preference("media.navigator.permission.disabled", True)
-        opts.set_preference("media.getusermedia.insecure.enabled", True)
-        if browser_proxy_bridge is not None:
-            configure_firefox_proxy(opts, browser_proxy_bridge.url)
-        driver = Firefox(options=opts)
-
-        log("Browser initialized")
-        if session_refresh_diagnostic_username:
-            login_diagnostic_account(driver, session_refresh_diagnostic_username)
-        else:
-            create_account(driver)
-
-            set_step("email-verification")
-            verified = verify_email_address(driver)
-            if verified:
-                print("Email verified.", flush=True)
-            else:
-                print("Email verification failed.", flush=True)
-
-        if age_verification_enabled and not session_refresh_diagnostic_username:
-            set_step("age-verification")
-            age_verification_cookie = driver.get_cookie(".ROBLOSECURITY")
-            if not age_verification_cookie or not age_verification_cookie.get("value"):
-                raise RuntimeError(
-                    ".ROBLOSECURITY cookie was not found before age verification"
-                )
-            verify_age(
-                driver,
-                age_verification_cookie["value"],
-                config=AgeVerificationConfig.from_environment(),
-                logger=log,
-            )
-
-        set_step("verify-hba")
-        seeded_hba_material = hba_material
-        current_hba_material, hba_observations = inspect_hba_keypair(
-            driver,
-            seeded_hba_material,
-        )
-        observed_public_keys = [
-            observation.get("client_public_key")
-            for observation in hba_observations
-            if isinstance(observation, dict) and observation.get("client_public_key")
-        ]
-        observed_public_key = observed_public_keys[-1] if observed_public_keys else None
-        if observed_public_key == seeded_hba_material.public_key_spki:
-            hba_material = seeded_hba_material
-        elif observed_public_key == current_hba_material.public_key_spki or observed_public_key is None:
-            hba_material = current_hba_material
-        else:
-            raise RuntimeError(
-                "Roblox signup used an HBA key that is no longer available in IndexedDB"
-            )
-        log(
-            "Verified browser HBA key",
-            key_changed=(
-                current_hba_material.public_key_spki
-                != seeded_hba_material.public_key_spki
-            ),
-            observed_intents=len(observed_public_keys),
-            observed_key_matches_selected=(
-                observed_public_key is None
-                or observed_public_key == hba_material.public_key_spki
-            ),
-            selected_public_key=secret_summary(hba_material.public_key_spki),
-        )
-
-        if browser_session_refresh_diagnostic:
-            set_step("browser-session-refresh-diagnostic")
-            try:
-                browser_refresh_result = browser_refresh_session(driver)
-            except Exception as exc:
-                raise BrowserSessionRefreshDiagnosticFailed(
-                    f"Browser session refresh diagnostic did not complete: {exc}"
-                ) from exc
-            log("Browser session refresh diagnostic", **browser_refresh_result)
-            if not browser_refresh_result.get("ok"):
-                raise BrowserSessionRefreshDiagnosticFailed(
-                    "Browser session refresh diagnostic was rejected: "
-                    f"status={browser_refresh_result.get('refresh_status')} "
-                    f"authenticated_after_status="
-                    f"{browser_refresh_result.get('authenticated_after_status')} "
-                    f"error={browser_refresh_result.get('error')}"
-                )
-
-        set_step("session-capture")
-        roblosecurity_cookie = driver.get_cookie('.ROBLOSECURITY')
-        if not roblosecurity_cookie or not roblosecurity_cookie.get("value"):
-            raise RuntimeError(".ROBLOSECURITY cookie was not found in the browser session")
-
-        set_step("session-upload")
-        log(
-            "Uploading Roblox session",
-            upload_url=upload_url,
-            ingest_division=upload_division,
-            ingest_pool=upload_pool,
-            cookie=secret_summary(roblosecurity_cookie["value"]),
-            hba_material=bool(hba_material),
-            selenium_proxy=proxy_summary(import_proxy),
-        )
-
-        try:
-            payload = upload_session_cookie(roblosecurity_cookie["value"], import_proxy)
-        except Exception as exc:
-            raise SessionImportFailed(str(exc)) from exc
-        session = payload.get("session") or {}
-        if session:
-            print(
-                "Cookie uploaded successfully.",
-                f"session_id={session.get('session_id')}",
-                f"username={session.get('username')}",
-                f"status={session.get('status')}",
-                flush=True,
-            )
-        else:
-            job = payload.get("job") or {}
-            print(
-                "Cookie import queued.",
-                f"job_id={job.get('id')}",
-                f"status={job.get('status')}",
-                f"status_url={job.get('status_url')}",
-                flush=True,
-            )
+        proxy, proxy_bridge = start_proxy()
+        driver = start_browser(proxy_bridge)
+        prepare_account(driver)
+        select_hba_material(driver)
+        run_session_refresh_diagnostic(driver)
+        upload_browser_session(driver, proxy)
         return True
     except CaptchaDetected:
         log("Captcha detected", step=CURRENT_STEP)
@@ -1005,16 +958,13 @@ def main():
         report_exception("generator", exc, driver)
         raise
     finally:
-        try:
-            if driver is not None:
+        if driver is not None:
+            with suppress(Exception):
                 driver.quit()
-        except Exception:
-            print("program closed, but webdriver already shutdown", flush=True)
-        try:
-            if browser_proxy_bridge is not None:
-                browser_proxy_bridge.close()
-        except Exception as exc:
-            log("Could not stop local Selenium proxy bridge", error=exc)
+        if proxy_bridge is not None:
+            with suppress(Exception):
+                proxy_bridge.close()
+
 
 def run_loop(generate=None, max_successes=None):
     generate = generate or main
@@ -1035,21 +985,13 @@ def run_loop(generate=None, max_successes=None):
         except CaptchaDetected as exc:
             log("Stopping generator after captcha", successes=successes, error=exc)
             return successes
-        except SessionImportFailed as exc:
+        except (SessionImportFailed, BrowserSessionRefreshDiagnosticFailed) as exc:
             log(
-                "Stopping generator after session import failure",
+                "Stopping generator after fatal failure",
                 successes=successes,
                 error=exc,
             )
-            github_error(f"Roblox session import failed: {exc}")
-            raise
-        except BrowserSessionRefreshDiagnosticFailed as exc:
-            log(
-                "Stopping generator after browser session refresh diagnostic failure",
-                successes=successes,
-                error=exc,
-            )
-            github_error(f"Browser session refresh diagnostic failed: {exc}")
+            github_error(str(exc))
             raise
         except Exception as exc:
             if session_refresh_diagnostic_username:
@@ -1069,16 +1011,17 @@ def run_loop(generate=None, max_successes=None):
                     retries=generator_retry_attempts,
                     error=exc,
                 )
-                github_error(
-                    f"Generator exceeded {generator_retry_attempts} retries: {exc}"
-                )
-                raise RuntimeError(f"Exceeded {generator_retry_attempts} generator retries") from exc
+                github_error(f"Generator exceeded {generator_retry_attempts} retries: {exc}")
+                raise RuntimeError(
+                    f"Exceeded {generator_retry_attempts} generator retries"
+                ) from exc
             log(
                 "Retrying generator after failure",
                 successes=successes,
                 retry=f"{failures}/{generator_retry_attempts}",
                 error=exc,
             )
+
 
 if __name__ == "__main__":
     run_loop()

@@ -7,9 +7,10 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Self
 from urllib.parse import urlparse
 
 import requests
@@ -19,12 +20,10 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 START_VERIFICATION_URL = (
-    "https://apis.roblox.com/age-verification-service/v1/"
-    "persona-id-verification/start-verification"
+    "https://apis.roblox.com/age-verification-service/v1/persona-id-verification/start-verification"
 )
 DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) "
-    "Gecko/20100101 Firefox/153.0"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0"
 )
 
 SUCCESS_STATUSES = {"approved", "completed"}
@@ -75,9 +74,7 @@ class AgeVerificationConfig:
         if ffmpeg_path is None:
             raise AgeVerificationError("ffmpeg was not found on PATH")
         if not self.video_path.is_file():
-            raise AgeVerificationError(
-                f"Fake-camera video does not exist: {self.video_path}"
-            )
+            raise AgeVerificationError(f"Fake-camera video does not exist: {self.video_path}")
         if not self.loopback_device.exists():
             raise AgeVerificationError(
                 f"Loopback camera does not exist: {self.loopback_device}; "
@@ -86,21 +83,13 @@ class AgeVerificationConfig:
         return ffmpeg_path
 
     @classmethod
-    def from_environment(cls) -> "AgeVerificationConfig":
+    def from_environment(cls) -> AgeVerificationConfig:
         return cls(
             video_path=Path(os.getenv("FAKE_CAM_VIDEO", "TEST.mov")).expanduser(),
-            loopback_device=Path(
-                os.getenv("FAKE_CAM_DEVICE", "/dev/video1")
-            ).expanduser(),
-            completion_timeout_seconds=_positive_float(
-                "AGE_VERIFICATION_TIMEOUT_SECONDS", 600
-            ),
-            request_timeout_seconds=_positive_float(
-                "AGE_VERIFICATION_REQUEST_TIMEOUT_SECONDS", 20
-            ),
-            webcam_startup_seconds=_positive_float(
-                "FAKE_CAM_STARTUP_SECONDS", 1
-            ),
+            loopback_device=Path(os.getenv("FAKE_CAM_DEVICE", "/dev/video1")).expanduser(),
+            completion_timeout_seconds=_positive_float("AGE_VERIFICATION_TIMEOUT_SECONDS", 600),
+            request_timeout_seconds=_positive_float("AGE_VERIFICATION_REQUEST_TIMEOUT_SECONDS", 20),
+            webcam_startup_seconds=_positive_float("FAKE_CAM_STARTUP_SECONDS", 1),
         )
 
 
@@ -175,8 +164,7 @@ class FakeWebcam:
             return_code = self.process.poll()
             if return_code is not None:
                 raise AgeVerificationError(
-                    "ffmpeg exited during fake-camera startup "
-                    f"with status {return_code}"
+                    f"ffmpeg exited during fake-camera startup with status {return_code}"
                 )
         except BaseException:
             self.stop()
@@ -203,7 +191,7 @@ class FakeWebcam:
             process.wait(timeout=3)
         _log(self.logger, "Fake camera stopped")
 
-    def __enter__(self) -> "FakeWebcam":
+    def __enter__(self) -> Self:
         self.start()
         return self
 
@@ -262,8 +250,7 @@ def request_verification_link(
         body = response.text if response is not None else ""
         body = (body or "").replace("\r", "\\r").replace("\n", "\\n")
         raise AgeVerificationError(
-            "Could not start age verification: "
-            f"status={status} body={body[:500]}"
+            f"Could not start age verification: status={status} body={body[:500]}"
         ) from exc
 
     try:
@@ -271,17 +258,11 @@ def request_verification_link(
     except ValueError as exc:
         body = (response.text or "").replace("\r", "\\r").replace("\n", "\\n")
         raise AgeVerificationError(
-            "Age-verification service returned invalid JSON: "
-            f"body={body[:500]}"
+            f"Age-verification service returned invalid JSON: body={body[:500]}"
         ) from exc
 
-    if not isinstance(response_payload, dict):
-        raise AgeVerificationError(
-            "Age-verification service returned an unexpected JSON payload"
-        )
-
-    verification_link = response_payload.get("verificationLink")
-    parsed_link = urlparse(verification_link or "")
+    verification_link = response_payload["verificationLink"]
+    parsed_link = urlparse(verification_link)
     if parsed_link.scheme != "https" or not parsed_link.netloc:
         raise AgeVerificationError(
             "Age-verification response did not contain a valid verificationLink"
@@ -314,14 +295,7 @@ def _click_camera(driver: object) -> None:
 
 
 def read_inquiry_status(driver: object) -> dict[str, object]:
-    result = driver.execute_async_script(INQUIRY_STATUS_SCRIPT)
-    if not isinstance(result, dict):
-        return {
-            "status": None,
-            "httpStatus": None,
-            "error": "unexpected inquiry-status response",
-        }
-    return result
+    return driver.execute_async_script(INQUIRY_STATUS_SCRIPT)
 
 
 def _verification_complete(driver: object, verification_host: str) -> bool:
@@ -332,19 +306,15 @@ def _verification_complete(driver: object, verification_host: str) -> bool:
         return True
 
     inquiry = read_inquiry_status(driver)
-    status = inquiry.get("status")
+    status = inquiry["status"]
     if status in SUCCESS_STATUSES:
         return True
     if status in FAILURE_STATUSES:
-        raise AgeVerificationError(
-            f"Persona inquiry reached terminal status: {status}"
-        )
+        raise AgeVerificationError(f"Persona inquiry reached terminal status: {status}")
 
     page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
     if "couldn't access camera" in page_text:
-        raise AgeVerificationError(
-            "Persona could not access the configured camera"
-        )
+        raise AgeVerificationError("Persona could not access the configured camera")
     return False
 
 
@@ -358,9 +328,7 @@ def verify_age(
     """Run Persona age estimation using the authenticated Roblox session."""
 
     config = config or AgeVerificationConfig.from_environment()
-    user_agent = (
-        driver.execute_script("return navigator.userAgent") or DEFAULT_USER_AGENT
-    )
+    user_agent = driver.execute_script("return navigator.userAgent") or DEFAULT_USER_AGENT
 
     _log(logger, "Starting age verification")
     verification_link = request_verification_link(

@@ -3,7 +3,6 @@ import os
 import random
 import re
 
-
 DEFAULT_USERNAME_STYLE = (os.getenv("USERNAME_STYLE", "varied") or "varied").strip().lower()
 DEFAULT_USERNAME_LENGTH = (os.getenv("USERNAME_LENGTH", "varied") or "varied").strip().lower()
 DEFAULT_USERNAME_KEYWORD = re.sub(r"[^A-Za-z0-9_]", "", (os.getenv("USERNAME_KEYWORD", "") or "")).strip("_")
@@ -189,9 +188,7 @@ def is_valid_username(candidate):
         return False
     if candidate.count("_") > 1:
         return False
-    if re.search(r"(.)\1\1\1", candidate.lower()):
-        return False
-    return True
+    return not re.search(r"(.)\1\1\1", candidate.lower())
 
 
 def _syllable_word(rng, syllables=None):
