@@ -112,13 +112,8 @@ def _log(logger: LogFunction | None, message: str, **fields: object) -> None:
 
 
 class FakeWebcam:
-    def __init__(
-        self,
-        config: AgeVerificationConfig,
-        logger: LogFunction | None = None,
-    ) -> None:
+    def __init__(self, config: AgeVerificationConfig) -> None:
         self.config = config
-        self.logger = logger
         self.process: subprocess.Popen[bytes] | None = None
 
     def start(self) -> None:
@@ -166,13 +161,6 @@ class FakeWebcam:
             self.stop()
             raise
 
-        _log(
-            self.logger,
-            "Fake camera started",
-            video=self.config.video_path,
-            device=self.config.loopback_device,
-        )
-
     def stop(self) -> None:
         process = self.process
         self.process = None
@@ -185,7 +173,6 @@ class FakeWebcam:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
-        _log(self.logger, "Fake camera stopped")
 
     def __enter__(self) -> Self:
         self.start()
@@ -324,24 +311,17 @@ def verify_age(
     config = config or AgeVerificationConfig.from_environment()
     user_agent = driver.execute_script("return navigator.userAgent") or DEFAULT_USER_AGENT
 
-    _log(logger, "Starting age verification")
     verification_link = request_verification_link(
         cookie,
         user_agent=user_agent,
         timeout_seconds=config.request_timeout_seconds,
     )
-    _log(
-        logger,
-        "Age-verification session created",
-        host=urlparse(verification_link).netloc,
-    )
     verification_host = urlparse(verification_link).netloc.lower()
 
-    with FakeWebcam(config, logger):
+    with FakeWebcam(config):
         driver.get(verification_link)
         _click_continue(driver)
         _click_camera(driver)
-        _log(logger, "Waiting for age-verification completion")
         try:
             WebDriverWait(driver, config.completion_timeout_seconds).until(
                 lambda current_driver: _verification_complete(
