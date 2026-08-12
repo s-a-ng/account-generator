@@ -160,6 +160,74 @@ class SessionUploadTests(unittest.TestCase):
         self.assertEqual(payload["hba_private_key_jwk"], "private-key")
         self.assertNotIn("proxy", payload)
 
+    def test_upload_includes_the_proxy_used_by_selenium(self):
+        class HbaMaterial:
+            @staticmethod
+            def upload_payload():
+                return {"hba_private_key_jwk": "private-key"}
+
+        class Response:
+            status_code = 200
+            text = '{"ok":true,"session":{"session_id":"session-1"}}'
+            headers = {"content-type": "application/json"}
+
+            @staticmethod
+            def json():
+                return {"ok": True, "session": {"session_id": "session-1"}}
+
+        with (
+            patch.object(firefox, "hba_material", HbaMaterial()),
+            patch.object(firefox.requests, "post", return_value=Response()) as post,
+            patch.object(firefox, "log"),
+        ):
+            firefox.upload_session_cookie(
+                "cookie-value",
+                "socks5://user:password@proxy.example:1080",
+            )
+
+        self.assertEqual(
+            post.call_args.kwargs["json"]["proxy"],
+            "socks5://user:password@proxy.example:1080",
+        )
+
+
+class ImportProxyTests(unittest.TestCase):
+    def test_proxy_endpoint_is_derived_from_the_upload_origin(self):
+        with patch.object(
+            firefox,
+            "upload_url",
+            "https://command.botted.org/api/internal/roblox-sessions/import",
+        ):
+            self.assertEqual(
+                firefox.control_endpoint("/api/internal/roblox-sessions/import-proxy"),
+                "https://command.botted.org/api/internal/roblox-sessions/import-proxy",
+            )
+
+    def test_proxy_request_is_scoped_to_the_ingest_division(self):
+        class Response:
+            status_code = 200
+            text = '{"ok":true,"proxy":"socks5://user:password@proxy.example:1080"}'
+            headers = {"content-type": "application/json"}
+
+            @staticmethod
+            def json():
+                return {
+                    "ok": True,
+                    "proxy": "socks5://user:password@proxy.example:1080",
+                }
+
+        with (
+            patch.object(firefox.requests, "post", return_value=Response()) as post,
+            patch.object(firefox, "upload_division", "farming"),
+            patch.object(firefox, "log") as log,
+        ):
+            proxy = firefox.acquire_import_proxy()
+
+        self.assertEqual(proxy, "socks5://user:password@proxy.example:1080")
+        self.assertEqual(post.call_args.kwargs["json"], {"division": "farming"})
+        self.assertNotIn("user", str(log.call_args.kwargs))
+        self.assertNotIn("password", str(log.call_args.kwargs))
+
 
 class DiagnosticLoginTests(unittest.TestCase):
     def test_diagnostic_username_requires_browser_session_refresh(self):

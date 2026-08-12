@@ -15,6 +15,11 @@ on:
         description: Stop after this many successful imports (0 means continue until CAPTCHA)
         required: true
         default: "0"
+      use_selenium_proxy:
+        description: Route Selenium through a SOCKS5 proxy from the division pool
+        required: true
+        type: boolean
+        default: false
       browser_session_refresh_diagnostic:
         description: Refresh the session once inside Firefox before control-server import
         required: true
@@ -58,6 +63,7 @@ jobs:
           GENERATOR_ARTIFACT_DIR: artifacts/generator
           GENERATOR_RETRY_ATTEMPTS: "5"
           GENERATOR_MAX_SUCCESSES: ${{ inputs.max_successes }}
+          SELENIUM_PROXY_ENABLED: ${{ inputs.use_selenium_proxy }}
           BROWSER_SESSION_REFRESH_DIAGNOSTIC: ${{ inputs.browser_session_refresh_diagnostic }}
           SESSION_REFRESH_DIAGNOSTIC_USERNAME: ${{ inputs.diagnostic_username }}
           AGE_VERIFICATION_ENABLED: "false"

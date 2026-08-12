@@ -19,6 +19,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from pymailtm import Account
 from ageverify import AgeVerificationConfig, verify_age
+from browser_proxy import BrowserProxyBridge, configure_firefox_proxy
 from username_generator import generate_username
 from session_context import (
     browser_refresh_session,
@@ -82,6 +83,20 @@ def secret_summary(value):
         return "<missing>"
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
     return f"<set len={len(value)} sha256={digest}>"
+
+def proxy_summary(value):
+    text = str(value or "")
+    if not text:
+        return {"present": False}
+    parsed = urlparse(text)
+    host = parsed.hostname or ""
+    return {
+        "present": True,
+        "scheme": parsed.scheme or None,
+        "host_sha256": hashlib.sha256(host.encode("utf-8")).hexdigest()[:10] if host else None,
+        "port": parsed.port,
+        "has_auth": bool(parsed.username or parsed.password),
+    }
 
 def redacted_url(url):
     if not url:
@@ -268,6 +283,7 @@ generator_max_successes = env_nonnegative_int("GENERATOR_MAX_SUCCESSES", 0)
 age_verification_enabled = env_bool("AGE_VERIFICATION_ENABLED", True)
 browser_session_refresh_diagnostic = env_bool("BROWSER_SESSION_REFRESH_DIAGNOSTIC", False)
 session_refresh_diagnostic_username = os.getenv("SESSION_REFRESH_DIAGNOSTIC_USERNAME", "").strip()
+selenium_proxy_enabled = env_bool("SELENIUM_PROXY_ENABLED", False)
 
 hba_material = None
 
@@ -306,6 +322,7 @@ def validate_environment():
         age_verification_enabled=age_verification_enabled,
         browser_session_refresh_diagnostic=browser_session_refresh_diagnostic,
         session_refresh_diagnostic_username=session_refresh_diagnostic_username or "<disabled>",
+        selenium_proxy_enabled=selenium_proxy_enabled,
         fake_cam_video=(
             age_verification_config.video_path
             if age_verification_config is not None
@@ -534,6 +551,43 @@ def parse_upload_payload(response):
             f"body={response_body_preview(response)}"
         ) from exc
 
+def control_endpoint(path):
+    parsed = urlparse(upload_url)
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+def acquire_import_proxy():
+    response = requests.post(
+        control_endpoint("/api/internal/roblox-sessions/import-proxy"),
+        json={"division": upload_division},
+        headers={"x-session-ingest-key": upload_key},
+        timeout=upload_enqueue_timeout_seconds,
+    )
+    payload = parse_upload_payload(response)
+    proxy = payload.get("proxy")
+    if response.status_code != 200 or not proxy:
+        raise RuntimeError(
+            f"Failed to acquire Selenium proxy: status={response.status_code} "
+            f"body={response_body_preview(response)}"
+        )
+    log("Acquired Selenium proxy", proxy=proxy_summary(proxy))
+    return proxy
+
+def preflight_import_proxy(proxy):
+    response = requests.get(
+        CREATE_ACCOUNT_URL,
+        headers={"user-agent": ROBLOX_WEB_USER_AGENT},
+        proxies={"http": proxy, "https": proxy},
+        timeout=upload_enqueue_timeout_seconds,
+    )
+    log(
+        "Selenium proxy preflight",
+        proxy=proxy_summary(proxy),
+        status=response.status_code,
+        url=redacted_url(response.url),
+    )
+    if response.status_code >= 500:
+        raise RuntimeError(f"Selenium proxy preflight failed with status {response.status_code}")
+
 def import_status_url(job):
     job_id = job.get("id")
     status_url = job.get("status_url")
@@ -625,7 +679,7 @@ def poll_upload_import(job):
 
         time.sleep(upload_import_poll_seconds)
 
-def upload_session_cookie(cookie):
+def upload_session_cookie(cookie, proxy=None):
     if not hba_material:
         raise RuntimeError("HBA material is required before uploading Roblox sessions")
 
@@ -635,6 +689,8 @@ def upload_session_cookie(cookie):
         "division": upload_division,
         "pool": upload_pool,
     }
+    if proxy:
+        payload["proxy"] = proxy
     payload.update(hba_material.upload_payload())
 
     response = requests.post(
@@ -783,11 +839,22 @@ def login_diagnostic_account(driver, username):
 def main():
     global hba_material
     driver = None
+    browser_proxy_bridge = None
+    import_proxy = None
     hba_material = None
 
     try:
         set_step("validate-environment")
         validate_environment()
+        if selenium_proxy_enabled:
+            set_step("acquire-selenium-proxy")
+            import_proxy = acquire_import_proxy()
+            preflight_import_proxy(import_proxy)
+            browser_proxy_bridge = BrowserProxyBridge(
+                import_proxy,
+                upload_enqueue_timeout_seconds,
+            )
+            log("Started local Selenium proxy bridge")
         set_step("browser-start-firefox")
         from undetected_geckodriver import Firefox
         from selenium.webdriver.firefox.options import Options as FxOptions
@@ -797,6 +864,8 @@ def main():
         opts.set_preference("permissions.default.microphone", 1)
         opts.set_preference("media.navigator.permission.disabled", True)
         opts.set_preference("media.getusermedia.insecure.enabled", True)
+        if browser_proxy_bridge is not None:
+            configure_firefox_proxy(opts, browser_proxy_bridge.url)
         driver = Firefox(options=opts)
 
         log("Browser initialized")
@@ -891,10 +960,11 @@ def main():
             ingest_pool=upload_pool,
             cookie=secret_summary(roblosecurity_cookie["value"]),
             hba_material=bool(hba_material),
+            selenium_proxy=proxy_summary(import_proxy),
         )
 
         try:
-            payload = upload_session_cookie(roblosecurity_cookie["value"])
+            payload = upload_session_cookie(roblosecurity_cookie["value"], import_proxy)
         except Exception as exc:
             raise SessionImportFailed(str(exc)) from exc
         session = payload.get("session") or {}
@@ -929,6 +999,11 @@ def main():
                 driver.quit()
         except Exception:
             print("program closed, but webdriver already shutdown", flush=True)
+        try:
+            if browser_proxy_bridge is not None:
+                browser_proxy_bridge.close()
+        except Exception as exc:
+            log("Could not stop local Selenium proxy bridge", error=exc)
 
 def run_loop(generate=None, max_successes=None):
     generate = generate or main
