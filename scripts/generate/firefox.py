@@ -22,7 +22,6 @@ from selenium.webdriver.support.ui import Select, WebDriverWait
 from session_context import (
     browser_refresh_session,
     inspect_hba_keypair,
-    install_hba_request_observer,
     seed_hba_keypair,
 )
 from username_generator import generate_username
@@ -34,9 +33,7 @@ LOGIN_URL = "https://www.roblox.com/login"
 ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
 MAX_SIGNUP_RELOADS = 5
 MAX_USERNAME_ATTEMPTS = 25
-ROBLOX_WEB_USER_AGENT = (
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
-)
+ROBLOX_WEB_USER_AGENT = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
 ADD_EMAIL_BUTTON_XPATH = (
     "//div[contains(@class, 'settings-text-field-container')]"
     "[.//span[text()='Email']]//button[contains(@class, 'foundation-web-button') "
@@ -234,7 +231,11 @@ def generate_email(password):
             log("Created mail.tm account", address=address, account_id=account["id"])
             return address, password, account["id"]
         except requests.RequestException as error:
-            log("mail.tm request failed", error=error, attempt=f"{attempt}/{max_attempts}")
+            log(
+                "mail.tm request failed",
+                error=error,
+                attempt=f"{attempt}/{max_attempts}",
+            )
             if attempt < max_attempts:
                 time.sleep(2)
 
@@ -249,7 +250,20 @@ except OSError:
 
 def generate_random_birthdate():
     month = random.choice(
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        [
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+        ]
     )
     day = random.randint(1, 26)
     year = str(random.randint(1995, 2002))
@@ -258,9 +272,7 @@ def generate_random_birthdate():
 
 PASSWORD = os.getenv("PASSWORD")
 upload_key = os.getenv("UPLOAD_KEY")
-upload_url = os.getenv(
-    "UPLOAD_URL", "https://command.botted.org/api/internal/roblox-sessions/import"
-)
+upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/internal/roblox-sessions/import")
 upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip() or "default"
 upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -275,8 +287,6 @@ browser_session_refresh_diagnostic = env_bool("BROWSER_SESSION_REFRESH_DIAGNOSTI
 session_refresh_diagnostic_username = os.getenv("SESSION_REFRESH_DIAGNOSTIC_USERNAME", "").strip()
 selenium_proxy_enabled = env_bool("SELENIUM_PROXY_ENABLED", False)
 
-hba_material = None
-
 
 def validate_environment():
     if not PASSWORD:
@@ -286,14 +296,9 @@ def validate_environment():
     if len(upload_division) > 64:
         raise RuntimeError("ROBLOX_SESSION_INGEST_DIVISION must be 64 characters or fewer")
     if upload_pool == "project" or not POOL_NAME_PATTERN.match(upload_pool):
-        raise RuntimeError(
-            "ROBLOX_SESSION_INGEST_POOL must use lowercase letters, numbers, "
-            "underscores, or hyphens"
-        )
+        raise RuntimeError("ROBLOX_SESSION_INGEST_POOL must use lowercase letters, numbers, underscores, or hyphens")
     if session_refresh_diagnostic_username and not browser_session_refresh_diagnostic:
-        raise RuntimeError(
-            "SESSION_REFRESH_DIAGNOSTIC_USERNAME requires BROWSER_SESSION_REFRESH_DIAGNOSTIC"
-        )
+        raise RuntimeError("SESSION_REFRESH_DIAGNOSTIC_USERNAME requires BROWSER_SESSION_REFRESH_DIAGNOSTIC")
     age_verification_config = None
     if age_verification_enabled:
         age_verification_config = AgeVerificationConfig.from_environment()
@@ -314,15 +319,9 @@ def validate_environment():
         browser_session_refresh_diagnostic=browser_session_refresh_diagnostic,
         session_refresh_diagnostic_username=session_refresh_diagnostic_username or "<disabled>",
         selenium_proxy_enabled=selenium_proxy_enabled,
-        fake_cam_video=(
-            age_verification_config.video_path
-            if age_verification_config is not None
-            else "<disabled>"
-        ),
+        fake_cam_video=(age_verification_config.video_path if age_verification_config is not None else "<disabled>"),
         fake_cam_device=(
-            age_verification_config.loopback_device
-            if age_verification_config is not None
-            else "<disabled>"
+            age_verification_config.loopback_device if age_verification_config is not None else "<disabled>"
         ),
         upload_key=secret_summary(upload_key),
         password=secret_summary(PASSWORD),
@@ -395,7 +394,7 @@ def fill_out_page(driver):
             return False
 
         try:
-            result = WebDriverWait(driver, 10).until(username_result)
+            result = WebDriverWait(driver, 3).until(username_result)
             if result == "accepted":
                 print(f"Username {username} accepted.")
                 break
@@ -403,18 +402,14 @@ def fill_out_page(driver):
         except TimeoutException:
             print(f"Username {username} validation timed out, trying again.")
     else:
-        raise SignupRetry(
-            f"Could not find an available username after {MAX_USERNAME_ATTEMPTS} attempts"
-        )
+        raise SignupRetry(f"Could not find an available username after {MAX_USERNAME_ATTEMPTS} attempts")
 
     checkboxes = driver.find_elements(By.ID, "signup-checkbox")
     if checkboxes:
         checkboxes[0].click()
         random_sleep()
 
-    signup_button = WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((By.ID, "signup-button"))
-    )
+    signup_button = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "signup-button")))
     signup_button.click()
     random_sleep()
 
@@ -471,9 +466,7 @@ def link_email(driver, email):
             print(f"Entered email into modal: {email}")
             random_sleep()
 
-            add_email_btn = wait.until(
-                EC.element_to_be_clickable((By.XPATH, SUBMIT_EMAIL_BUTTON_XPATH))
-            )
+            add_email_btn = wait.until(EC.element_to_be_clickable((By.XPATH, SUBMIT_EMAIL_BUTTON_XPATH)))
             add_email_btn.click()
             print("Clicked Add Email button")
             random_sleep()
@@ -579,8 +572,7 @@ def acquire_import_proxy():
     payload = parse_upload_payload(response)
     if response.status_code != 200:
         raise RuntimeError(
-            f"Failed to acquire Selenium proxy: status={response.status_code} "
-            f"body={response_body_preview(response)}"
+            f"Failed to acquire Selenium proxy: status={response.status_code} body={response_body_preview(response)}"
         )
     proxy = payload["proxy"]
     log("Acquired Selenium proxy", proxy=proxy_summary(proxy))
@@ -621,8 +613,7 @@ def poll_upload_import(job):
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"Import status request failed: status={response.status_code} "
-                f"body={response_body_preview(response)}"
+                f"Import status request failed: status={response.status_code} body={response_body_preview(response)}"
             )
 
         current_job = payload["job"]
@@ -646,19 +637,15 @@ def poll_upload_import(job):
 
         if status == "failed":
             error = payload["error"] or current_job["error"]
-            raise RuntimeError(
-                f"Roblox session import failed: code={error['code']} message={error['message']}"
-            )
+            raise RuntimeError(f"Roblox session import failed: code={error['code']} message={error['message']}")
 
         if time.monotonic() >= deadline:
-            raise RuntimeError(
-                f"Timed out waiting for Roblox session import job {job_id}; last_status={status}"
-            )
+            raise RuntimeError(f"Timed out waiting for Roblox session import job {job_id}; last_status={status}")
 
         time.sleep(upload_import_poll_seconds)
 
 
-def upload_session_cookie(cookie, proxy=None):
+def upload_session_cookie(cookie, hba_material, proxy=None):
     if not hba_material:
         raise RuntimeError("HBA material is required before uploading Roblox sessions")
 
@@ -689,8 +676,7 @@ def upload_session_cookie(cookie, proxy=None):
     payload = parse_upload_payload(response)
     if response.status_code != 202:
         raise RuntimeError(
-            f"Failed to queue session import: status={response.status_code} "
-            f"body={response_body_preview(response)}"
+            f"Failed to queue session import: status={response.status_code} body={response_body_preview(response)}"
         )
 
     job = payload["job"]
@@ -711,11 +697,10 @@ def roblosecurity_cookie(driver, context):
 
 
 def create_account(driver):
-    global hba_material
-
     if not PASSWORD:
         raise RuntimeError("PASSWORD is required to create an account")
 
+    hba_material = None
     for signup_reload in range(MAX_SIGNUP_RELOADS + 1):
         set_step("open-signup")
         driver.get(CREATE_ACCOUNT_URL)
@@ -728,15 +713,7 @@ def create_account(driver):
         if hba_material is None:
             set_step("seed-hba")
             hba_material = seed_hba_keypair(driver)
-            log(
-                "Seeded browser HBA key",
-                public_key=secret_summary(hba_material.public_key_spki),
-                indexed_db=hba_material.db_name,
-                object_store=hba_material.object_store_name,
-                key=hba_material.key_name,
-            )
-
-        install_hba_request_observer(driver)
+            log("Seeded browser HBA key")
 
         set_step("fill-signup")
         fill_out_page(driver)
@@ -757,26 +734,17 @@ def create_account(driver):
 
     cookie = roblosecurity_cookie(driver, "after account creation")
     log("Account session created", cookie=secret_summary(cookie))
-    return cookie
+    return hba_material
 
 
 def login_diagnostic_account(driver, username):
-    global hba_material
-
     set_step("open-login")
     driver.get(LOGIN_URL)
     log("Opened Roblox login page", url=redacted_url(driver.current_url))
 
     set_step("seed-hba")
     hba_material = seed_hba_keypair(driver)
-    install_hba_request_observer(driver)
-    log(
-        "Seeded browser HBA key for diagnostic login",
-        public_key=secret_summary(hba_material.public_key_spki),
-        indexed_db=hba_material.db_name,
-        object_store=hba_material.object_store_name,
-        key=hba_material.key_name,
-    )
+    log("Seeded browser HBA key for diagnostic login")
 
     set_step("login-existing-account")
     wait = WebDriverWait(driver, 20)
@@ -791,7 +759,7 @@ def login_diagnostic_account(driver, username):
         cookie = driver.get_cookie(".ROBLOSECURITY")
         if cookie is not None and cookie["value"]:
             log("Diagnostic account login succeeded", username=username)
-            return cookie["value"]
+            return hba_material
         if driver.find_elements(
             By.CSS_SELECTOR,
             'iframe[title="Verification challenge"], iframe[src*="arkoselabs"]',
@@ -834,10 +802,9 @@ def start_browser(proxy_bridge):
 
 def prepare_account(driver):
     if session_refresh_diagnostic_username:
-        login_diagnostic_account(driver, session_refresh_diagnostic_username)
-        return
+        return login_diagnostic_account(driver, session_refresh_diagnostic_username)
 
-    create_account(driver)
+    hba_material = create_account(driver)
     set_step("email-verification")
     print(
         "Email verified." if verify_email_address(driver) else "Email verification failed.",
@@ -852,36 +819,17 @@ def prepare_account(driver):
             config=AgeVerificationConfig.from_environment(),
             logger=log,
         )
+    return hba_material
 
 
-def select_hba_material(driver):
-    global hba_material
-
+def capture_hba_material(driver, seeded):
     set_step("verify-hba")
-    seeded = hba_material
-    current, observations = inspect_hba_keypair(driver, seeded)
-    observed_keys = [
-        observation["client_public_key"]
-        for observation in observations
-        if "client_public_key" in observation
-    ]
-    observed = observed_keys[-1] if observed_keys else None
-
-    if observed == seeded.public_key_spki:
-        selected = seeded
-    elif observed is None or observed == current.public_key_spki:
-        selected = current
-    else:
-        raise RuntimeError("Roblox signup used an HBA key that is no longer available in IndexedDB")
-
-    hba_material = selected
+    current = inspect_hba_keypair(driver, seeded)
     log(
-        "Verified browser HBA key",
-        key_changed=current.public_key_spki != seeded.public_key_spki,
-        observed_intents=len(observed_keys),
-        observed_key_matches_selected=(observed is None or observed == selected.public_key_spki),
-        selected_public_key=secret_summary(selected.public_key_spki),
+        "Captured browser HBA key",
+        key_changed=current.private_key_jwk != seeded.private_key_jwk,
     )
+    return current
 
 
 def run_session_refresh_diagnostic(driver):
@@ -897,12 +845,10 @@ def run_session_refresh_diagnostic(driver):
         ) from error
     log("Browser session refresh diagnostic", **result)
     if not result["ok"]:
-        raise BrowserSessionRefreshDiagnosticFailed(
-            f"Browser session refresh diagnostic was rejected: {result}"
-        )
+        raise BrowserSessionRefreshDiagnosticFailed(f"Browser session refresh diagnostic was rejected: {result}")
 
 
-def upload_browser_session(driver, proxy):
+def upload_browser_session(driver, proxy, hba_material):
     set_step("session-capture")
     cookie = roblosecurity_cookie(driver, "in the browser session")
 
@@ -918,7 +864,7 @@ def upload_browser_session(driver, proxy):
     )
 
     try:
-        payload = upload_session_cookie(cookie, proxy)
+        payload = upload_session_cookie(cookie, hba_material, proxy)
     except Exception as error:
         raise SessionImportFailed(f"Roblox session import failed: {error}") from error
 
@@ -933,22 +879,19 @@ def upload_browser_session(driver, proxy):
 
 
 def main():
-    global hba_material
-
     driver = None
     proxy = None
     proxy_bridge = None
-    hba_material = None
 
     try:
         set_step("validate-environment")
         validate_environment()
         proxy, proxy_bridge = start_proxy()
         driver = start_browser(proxy_bridge)
-        prepare_account(driver)
-        select_hba_material(driver)
+        hba_material = prepare_account(driver)
+        hba_material = capture_hba_material(driver, hba_material)
         run_session_refresh_diagnostic(driver)
-        upload_browser_session(driver, proxy)
+        upload_browser_session(driver, proxy, hba_material)
         return True
     except CaptchaDetected:
         log("Captcha detected", step=CURRENT_STEP)
@@ -1012,9 +955,7 @@ def run_loop(generate=None, max_successes=None):
                     error=exc,
                 )
                 github_error(f"Generator exceeded {generator_retry_attempts} retries: {exc}")
-                raise RuntimeError(
-                    f"Exceeded {generator_retry_attempts} generator retries"
-                ) from exc
+                raise RuntimeError(f"Exceeded {generator_retry_attempts} generator retries") from exc
             log(
                 "Retrying generator after failure",
                 successes=successes,

@@ -1,18 +1,8 @@
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 HBA_SEED_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
-
-function base64FromArrayBuffer(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
-}
 
 function openDatabase(dbName, version, objectStoreName) {
   return new Promise((resolve, reject) => {
@@ -51,9 +41,7 @@ function putKeyPair(db, objectStoreName, keyName, keyPair) {
     true,
     ["sign", "verify"],
   );
-  const publicKeySpki = await crypto.subtle.exportKey("spki", keyPair.publicKey);
   const privateKeyJwk = await crypto.subtle.exportKey("jwk", keyPair.privateKey);
-  const publicKeyJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
 
   const db = await openDatabase(dbName, dbVersion, objectStoreName);
   try {
@@ -64,14 +52,11 @@ function putKeyPair(db, objectStoreName, keyName, keyPair) {
 
   done({
     ok: true,
-    public_key_spki: base64FromArrayBuffer(publicKeySpki),
     private_key_jwk: privateKeyJwk,
-    public_key_jwk: publicKeyJwk,
     db_name: dbName,
     object_store_name: objectStoreName,
     key_name: keyName,
     db_version: dbVersion,
-    meta_present: Boolean(meta),
   });
 })().catch((error) => {
   done({
@@ -82,141 +67,9 @@ function putKeyPair(db, objectStoreName, keyName, keyPair) {
 });
 """
 
-HBA_REQUEST_OBSERVER_SCRIPT = r"""
-(() => {
-  const storageKey = "roblox_hba_intent_observations";
-
-  function loadObservations() {
-    try {
-      return JSON.parse(sessionStorage.getItem(storageKey) || "[]");
-    } catch (_) {
-      return [];
-    }
-  }
-
-  function saveObservation(observation) {
-    const existing = loadObservations();
-    existing.push(observation);
-    sessionStorage.setItem(storageKey, JSON.stringify(existing.slice(-40)));
-  }
-
-  function findIntent(value, depth = 0) {
-    if (!value || typeof value !== "object" || depth > 4) return null;
-    const direct = value.secureAuthenticationIntent || value.SecureAuthenticationIntent;
-    if (direct && typeof direct.clientPublicKey === "string") return direct;
-    for (const child of Object.values(value)) {
-      const found = findIntent(child, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  function inspectIntent(body) {
-    try {
-      const parsed = typeof body === "string" ? JSON.parse(body) : body;
-      const intent = findIntent(parsed);
-      if (!intent) return null;
-      return {
-        client_public_key: intent.clientPublicKey,
-        timestamp_type: typeof intent.clientEpochTimestamp,
-        signature_length: String(intent.saiSignature || "").length,
-      };
-    } catch (_) {
-      return null;
-    }
-  }
-
-  if (window.__robloxHbaObserverInstalled) return;
-  window.__robloxHbaObserverInstalled = true;
-
-  const originalOpen = XMLHttpRequest.prototype.open;
-  const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-  const originalSend = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function(method, url, ...args) {
-    this.__robloxHbaObservedUrl = url;
-    this.__robloxHbaObservedMethod = String(method || "").toUpperCase();
-    this.__robloxHbaObservedHeaders = [];
-    return originalOpen.call(this, method, url, ...args);
-  };
-  XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
-    try {
-      this.__robloxHbaObservedHeaders.push(String(name || "").toLowerCase());
-    } catch (_) {}
-    return originalSetRequestHeader.call(this, name, value);
-  };
-  XMLHttpRequest.prototype.send = function(body) {
-    let target = null;
-    try {
-      target = new URL(String(this.__robloxHbaObservedUrl || ""), window.location.href);
-    } catch (_) {}
-    const intent = inspectIntent(body);
-    const isSessionRefresh = Boolean(
-      target
-      && target.hostname === "auth.roblox.com"
-      && target.pathname === "/v2/session/refresh"
-    );
-    if ((intent || isSessionRefresh) && target) {
-      const observation = {
-        transport: "xhr",
-        endpoint: `${target.origin}${target.pathname}`,
-        method: this.__robloxHbaObservedMethod,
-        request_header_names: Array.from(new Set(this.__robloxHbaObservedHeaders || [])).sort(),
-        request_body_length: typeof body === "string" ? body.length : null,
-        ...(intent || {}),
-      };
-      this.addEventListener("loadend", () => {
-        observation.response_status = Number(this.status || 0);
-        observation.response_has_xsrf = Boolean(this.getResponseHeader("x-csrf-token"));
-        observation.response_challenge_type = this.getResponseHeader("rblx-challenge-type") || null;
-        saveObservation(observation);
-      }, { once: true });
-    }
-    return originalSend.call(this, body);
-  };
-
-  const originalFetch = window.fetch;
-  if (typeof originalFetch === "function") {
-    window.fetch = function(input, init = {}) {
-      const intent = inspectIntent(init.body);
-      try {
-        const target = new URL(
-          typeof input === "string" ? input : input && input.url,
-          window.location.href,
-        );
-        const isSessionRefresh = (
-          target.hostname === "auth.roblox.com"
-          && target.pathname === "/v2/session/refresh"
-        );
-        if (intent || isSessionRefresh) {
-          const headers = new Headers(init.headers || {});
-          saveObservation({
-            transport: "fetch",
-            endpoint: `${target.origin}${target.pathname}`,
-            method: String(init.method || "GET").toUpperCase(),
-            request_header_names: Array.from(headers.keys()).map((name) => name.toLowerCase()).sort(),
-            request_body_length: typeof init.body === "string" ? init.body.length : null,
-            ...(intent || {}),
-          });
-        }
-      } catch (_) {}
-      return originalFetch.call(this, input, init);
-    };
-  }
-})();
-"""
-
 HBA_INSPECTION_SCRIPT = r"""
 const [dbName, objectStoreName, keyName, dbVersion] = arguments;
 const done = arguments[arguments.length - 1];
-
-function base64FromArrayBuffer(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
-}
 
 function getKeyPair() {
   return new Promise((resolve, reject) => {
@@ -240,22 +93,13 @@ function getKeyPair() {
 
 (async () => {
   const keyPair = await getKeyPair();
-  if (!keyPair || !keyPair.privateKey || !keyPair.publicKey) {
+  if (!keyPair || !keyPair.privateKey) {
     throw new Error("Stored HBA key pair is missing");
   }
-  const publicKeySpki = await crypto.subtle.exportKey("spki", keyPair.publicKey);
   const privateKeyJwk = await crypto.subtle.exportKey("jwk", keyPair.privateKey);
-  const publicKeyJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
-  let observations = [];
-  try {
-    observations = JSON.parse(sessionStorage.getItem("roblox_hba_intent_observations") || "[]");
-  } catch (_) {}
   done({
     ok: true,
-    public_key_spki: base64FromArrayBuffer(publicKeySpki),
     private_key_jwk: privateKeyJwk,
-    public_key_jwk: publicKeyJwk,
-    observations,
   });
 })().catch((error) => done({
   ok: false,
@@ -267,23 +111,12 @@ BROWSER_SESSION_REFRESH_SCRIPT = r"""
 const done = arguments[arguments.length - 1];
 const refreshUrl = "https://auth.roblox.com/v2/session/refresh";
 const authenticatedUrl = "https://users.roblox.com/v1/users/authenticated";
-const observationStorageKey = "roblox_hba_intent_observations";
 
 function timeoutResult(milliseconds) {
   return new Promise((resolve) => setTimeout(
     () => resolve({ settled: false, timeout_ms: milliseconds }),
     milliseconds,
   ));
-}
-
-function refreshObservations() {
-  try {
-    return JSON.parse(sessionStorage.getItem(observationStorageKey) || "[]")
-      .filter((entry) => entry && entry.endpoint === refreshUrl)
-      .slice(-4);
-  } catch (_) {
-    return [];
-  }
 }
 
 (async () => {
@@ -337,7 +170,6 @@ function refreshObservations() {
     response_code: refreshOutcome.response_code ?? null,
     response_message: refreshOutcome.response_message ?? null,
     xsrf_present_before: xsrfPresentBefore,
-    request_observations: refreshObservations(),
   });
 })().catch((error) => done({
   ok: false,
@@ -348,14 +180,11 @@ function refreshObservations() {
 
 @dataclass(frozen=True)
 class HbaMaterial:
-    public_key_spki: str
     private_key_jwk: dict
-    public_key_jwk: dict
     db_name: str
     object_store_name: str
     key_name: str
     db_version: int
-    created_at: str
 
     def upload_payload(self):
         return {
@@ -369,19 +198,12 @@ def seed_hba_keypair(driver):
         raise RuntimeError(f"Failed to seed HBA keypair: {result['error']}")
 
     return HbaMaterial(
-        public_key_spki=result["public_key_spki"],
         private_key_jwk=result["private_key_jwk"],
-        public_key_jwk=result["public_key_jwk"],
         db_name=result["db_name"],
         object_store_name=result["object_store_name"],
         key_name=result["key_name"],
         db_version=int(result["db_version"]),
-        created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
-
-
-def install_hba_request_observer(driver):
-    driver.execute_script(HBA_REQUEST_OBSERVER_SCRIPT)
 
 
 def inspect_hba_keypair(driver, seeded_material):
@@ -395,17 +217,13 @@ def inspect_hba_keypair(driver, seeded_material):
     if not result["ok"]:
         raise RuntimeError(f"Failed to inspect browser HBA keypair: {result['error']}")
 
-    current = HbaMaterial(
-        public_key_spki=result["public_key_spki"],
+    return HbaMaterial(
         private_key_jwk=result["private_key_jwk"],
-        public_key_jwk=result["public_key_jwk"],
         db_name=seeded_material.db_name,
         object_store_name=seeded_material.object_store_name,
         key_name=seeded_material.key_name,
         db_version=seeded_material.db_version,
-        created_at=seeded_material.created_at,
     )
-    return current, result["observations"]
 
 
 def browser_refresh_session(driver):
