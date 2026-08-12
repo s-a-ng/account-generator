@@ -1,5 +1,3 @@
-"""Roblox age-verification support for the Firefox account generator."""
-
 from __future__ import annotations
 
 import os
@@ -58,7 +56,7 @@ LogFunction = Callable[..., None]
 
 
 class AgeVerificationError(RuntimeError):
-    """Raised when the age-verification workflow cannot be completed."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -114,8 +112,6 @@ def _log(logger: LogFunction | None, message: str, **fields: object) -> None:
 
 
 class FakeWebcam:
-    """Streams a video into a v4l2 loopback device for one verification run."""
-
     def __init__(
         self,
         config: AgeVerificationConfig,
@@ -325,8 +321,6 @@ def verify_age(
     config: AgeVerificationConfig | None = None,
     logger: LogFunction | None = None,
 ) -> bool:
-    """Run Persona age estimation using the authenticated Roblox session."""
-
     config = config or AgeVerificationConfig.from_environment()
     user_agent = driver.execute_script("return navigator.userAgent") or DEFAULT_USER_AGENT
 

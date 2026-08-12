@@ -15,6 +15,7 @@ import requests
 from ageverify import AgeVerificationConfig, verify_age
 from browser_proxy import BrowserProxyBridge, configure_firefox_proxy
 from pymailtm import Account
+from pymailtm.pymailtm import CouldNotGetMessagesException
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
@@ -276,6 +277,7 @@ upload_url = os.getenv("UPLOAD_URL", "https://command.botted.org/api/internal/ro
 upload_division = os.getenv("ROBLOX_SESSION_INGEST_DIVISION", "default").strip() or "default"
 upload_pool = os.getenv("ROBLOX_SESSION_INGEST_POOL", "global").strip().lower() or "global"
 POOL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+BROWSER_ENGINES = {"undetected_geckodriver", "seleniumbase_uc"}
 upload_enqueue_timeout_seconds = env_float("UPLOAD_ENQUEUE_TIMEOUT_SECONDS", 15)
 upload_import_timeout_seconds = env_float("UPLOAD_IMPORT_TIMEOUT_SECONDS", 90)
 upload_import_poll_seconds = env_float("UPLOAD_IMPORT_POLL_SECONDS", 2)
@@ -286,6 +288,7 @@ age_verification_enabled = env_bool("AGE_VERIFICATION_ENABLED", True)
 browser_session_refresh_diagnostic = env_bool("BROWSER_SESSION_REFRESH_DIAGNOSTIC", False)
 session_refresh_diagnostic_username = os.getenv("SESSION_REFRESH_DIAGNOSTIC_USERNAME", "").strip()
 selenium_proxy_enabled = env_bool("SELENIUM_PROXY_ENABLED", False)
+browser_engine = os.getenv("BROWSER_ENGINE", "undetected_geckodriver").strip().lower()
 
 
 def validate_environment():
@@ -293,6 +296,8 @@ def validate_environment():
         raise RuntimeError("PASSWORD is required")
     if not upload_key:
         raise RuntimeError("UPLOAD_KEY is required")
+    if browser_engine not in BROWSER_ENGINES:
+        raise RuntimeError(f"BROWSER_ENGINE must be one of: {', '.join(sorted(BROWSER_ENGINES))}")
     if len(upload_division) > 64:
         raise RuntimeError("ROBLOX_SESSION_INGEST_DIVISION must be 64 characters or fewer")
     if upload_pool == "project" or not POOL_NAME_PATTERN.match(upload_pool):
@@ -319,6 +324,7 @@ def validate_environment():
         browser_session_refresh_diagnostic=browser_session_refresh_diagnostic,
         session_refresh_diagnostic_username=session_refresh_diagnostic_username or "<disabled>",
         selenium_proxy_enabled=selenium_proxy_enabled,
+        browser_engine=browser_engine,
         fake_cam_video=(age_verification_config.video_path if age_verification_config is not None else "<disabled>"),
         fake_cam_device=(
             age_verification_config.loopback_device if age_verification_config is not None else "<disabled>"
@@ -428,8 +434,7 @@ def poll_email(email, password, account_id):
             if messages:
                 print(f"Found {len(messages)} messages.")
                 return messages
-        except Exception as error:  # noqa: BLE001
-            # pymailtm exposes no public exception type for transient polling failures.
+        except (CouldNotGetMessagesException, requests.RequestException) as error:
             print(f"Error checking email: {error}")
         time.sleep(5)
 
@@ -783,10 +788,26 @@ def start_proxy():
 
 
 def start_browser(proxy_bridge):
+    set_step("browser-start")
+    if browser_engine == "seleniumbase_uc":
+        from seleniumbase import Driver
+
+        options = {
+            "uc": True,
+            "headed": True,
+            "window_size": "1920,1080",
+        }
+        if age_verification_enabled:
+            options["chromium_arg"] = "auto-accept-camera-and-microphone-capture"
+        if proxy_bridge is not None:
+            options["proxy"] = proxy_bridge.url
+        driver = Driver(**options)
+        log("Browser initialized", engine=browser_engine)
+        return driver
+
     from selenium.webdriver.firefox.options import Options as FxOptions
     from undetected_geckodriver import Firefox
 
-    set_step("browser-start-firefox")
     options = FxOptions()
     options.set_preference("general.useragent.override", ROBLOX_WEB_USER_AGENT)
     options.set_preference("permissions.default.camera", 1)
@@ -796,7 +817,7 @@ def start_browser(proxy_bridge):
     if proxy_bridge is not None:
         configure_firefox_proxy(options, proxy_bridge.url)
     driver = Firefox(options=options)
-    log("Browser initialized")
+    log("Browser initialized", engine=browser_engine)
     return driver
 
 

@@ -1,32 +1,33 @@
-name: firefox
+name: account generator
 
 on:
   workflow_dispatch:
     inputs:
       ingest_division:
-        description: Roblox session division
         required: true
         default: default
       ingest_pool:
-        description: Roblox session pool
         required: true
         default: global
       max_successes:
-        description: Stop after this many successful imports (0 means continue until CAPTCHA)
         required: true
         default: "0"
       use_selenium_proxy:
-        description: Route Selenium through a SOCKS5 proxy from the division pool
         required: true
         type: boolean
         default: false
+      browser_engine:
+        required: true
+        type: choice
+        default: undetected_geckodriver
+        options:
+          - undetected_geckodriver
+          - seleniumbase_uc
       browser_session_refresh_diagnostic:
-        description: Refresh the session once inside Firefox before control-server import
         required: true
         type: boolean
         default: false
       diagnostic_username:
-        description: Existing disposable account to use instead of signup for refresh diagnostics
         required: false
         default: ""
 
@@ -41,10 +42,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Upgrade pip
         run: |
           python -m pip install --upgrade pip
+
+      - name: Install undetected geckodriver dependencies
+        if: inputs.browser_engine == 'undetected_geckodriver'
+        run: |
           pip install -r requirements.txt
+
+      - name: Install SeleniumBase UC dependencies
+        if: inputs.browser_engine == 'seleniumbase_uc'
+        run: |
+          pip install -r requirements-seleniumbase.txt
 
       - name: Set up virtual display
         run: |
@@ -61,6 +71,7 @@ jobs:
           GENERATOR_RETRY_ATTEMPTS: "5"
           GENERATOR_MAX_SUCCESSES: ${{ inputs.max_successes }}
           SELENIUM_PROXY_ENABLED: ${{ inputs.use_selenium_proxy }}
+          BROWSER_ENGINE: ${{ inputs.browser_engine }}
           BROWSER_SESSION_REFRESH_DIAGNOSTIC: ${{ inputs.browser_session_refresh_diagnostic }}
           SESSION_REFRESH_DIAGNOSTIC_USERNAME: ${{ inputs.diagnostic_username }}
           AGE_VERIFICATION_ENABLED: "false"
