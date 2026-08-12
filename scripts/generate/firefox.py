@@ -34,8 +34,9 @@ LOGIN_URL = "https://www.roblox.com/login"
 ACCOUNT_SETTINGS_URL = "https://www.roblox.com/my/account#!/info"
 USERNAME_VALIDATION_URL = "https://auth.roblox.com/v1/usernames/validate"
 MAX_SIGNUP_RELOADS = 5
-MAX_USERNAME_ATTEMPTS = 25
 USERNAME_VALIDATION_TIMEOUT_MS = 3000
+ROBLOSECURITY_COOKIE_TIMEOUT_SECONDS = 30
+ROBLOSECURITY_COOKIE_POLL_SECONDS = 0.1
 ROBLOX_WEB_USER_AGENT = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
 USERNAME_VALIDATION_SCRIPT = """
 const [url, payload, timeoutMs, done] = arguments;
@@ -428,17 +429,17 @@ def fill_out_page(driver):
     username_input = driver.find_element(By.ID, "signup-username")
     signup_button = driver.find_element(By.ID, "signup-button")
 
-    for attempt in range(1, MAX_USERNAME_ATTEMPTS + 1):
+    attempt = 0
+    while True:
+        attempt += 1
         username = generate_username()
-        print(f"Attempting username: {username} ({attempt}/{MAX_USERNAME_ATTEMPTS})")
+        print(f"Attempting username: {username} ({attempt})")
         accepted, message = validate_username(driver, username, month, day, year)
         if accepted:
             username_input.send_keys(username)
             print(f"Username {username} accepted.")
             break
         print(f"Username {username} rejected: {message}")
-    else:
-        raise SignupRetry(f"Could not find an available username after {MAX_USERNAME_ATTEMPTS} attempts")
 
     checkboxes = driver.find_elements(By.ID, "signup-checkbox")
     if checkboxes:
@@ -724,11 +725,34 @@ def upload_session_cookie(cookie, hba_material, proxy=None):
     return poll_upload_import(job)
 
 
+def find_roblosecurity_cookie(driver):
+    cookies = driver.get_cookies()
+    if browser_engine == "seleniumbase_uc" and not any(
+        cookie["name"] == ".ROBLOSECURITY" for cookie in cookies
+    ):
+        cookies = driver.execute_cdp_cmd("Storage.getCookies", {})["cookies"]
+    return next(
+        (
+            cookie["value"]
+            for cookie in cookies
+            if cookie["name"] == ".ROBLOSECURITY" and cookie["value"]
+        ),
+        None,
+    )
+
+
 def roblosecurity_cookie(driver, context):
-    cookie = driver.get_cookie(".ROBLOSECURITY")
-    if cookie is None or not cookie["value"]:
-        raise RuntimeError(f".ROBLOSECURITY cookie was not found {context}")
-    return cookie["value"]
+    deadline = time.monotonic() + ROBLOSECURITY_COOKIE_TIMEOUT_SECONDS
+    while True:
+        cookie = find_roblosecurity_cookie(driver)
+        if cookie is not None:
+            return cookie
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f".ROBLOSECURITY cookie was not found {context} "
+                f"after {ROBLOSECURITY_COOKIE_TIMEOUT_SECONDS}s"
+            )
+        time.sleep(ROBLOSECURITY_COOKIE_POLL_SECONDS)
 
 
 def create_account(driver):
@@ -767,6 +791,7 @@ def create_account(driver):
             )
             random_sleep(1.5, 3.0)
 
+    set_step("capture-session")
     cookie = roblosecurity_cookie(driver, "after account creation")
     log("Account session created", cookie=secret_summary(cookie))
     return hba_material
@@ -791,8 +816,7 @@ def login_diagnostic_account(driver, username):
 
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
-        cookie = driver.get_cookie(".ROBLOSECURITY")
-        if cookie is not None and cookie["value"]:
+        if find_roblosecurity_cookie(driver) is not None:
             log("Diagnostic account login succeeded", username=username)
             return hba_material
         if driver.find_elements(
